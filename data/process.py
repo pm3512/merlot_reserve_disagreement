@@ -1,3 +1,5 @@
+from datetime import datetime, date
+import re
 import sys
 import os
 
@@ -6,23 +8,15 @@ sys.path.append('../')
 
 import argparse
 import csv
-import tempfile
 import hashlib
 import json
 import numpy as np
 import time
-from data.video_utils import extract_all_frames_from_video, extract_frames_from_video, clean_description, \
-    clean_subtitle_tuples, align_using_dtw, make_spectrogram, make_jpg_spectrograms, _invert_jpg_spectrogram
+from data.video_utils import extract_frames_from_video, make_jpg_spectrograms
 from data.data_utils import *
-import string
 import pandas as pd
-import shutil
-import atexit
-import gzip
-from data.youtube_utils import read_vtt_text
 from mreserve.lowercase_encoder import get_encoder
 import subprocess
-import librosa
 import scipy.signal.windows
 from data.offset_model.model import predict_offsets, get_features
 from scipy.io import wavfile
@@ -30,45 +24,44 @@ import torchvision.models as models
 import torch
 import torchvision.transforms as transforms
 # import zstandard
-import io
-import regex as re
 from data.clean_text import clean_text
-from google.cloud import storage
 import pysrt
+import dotenv
+dotenv.load_dotenv()
 
 
 parser = argparse.ArgumentParser(description='Convert downloaded files to TFRecord format')
 parser.add_argument(
-    '-bucket_name',
-    dest='bucket_name',
-    type=str,
-    help='Bucket name to use.'
-)
-parser.add_argument(
     '-fold',
     dest='fold',
-    default=0,
     type=int,
     help='which fold we are on'
 )
 parser.add_argument(
+    '-debug',
+    dest='debug',
+    default=False,
+    type=bool,
+    help='Debug mode',
+)
+parser.add_argument(
     '-num_folds',
     dest='num_folds',
-    default=25,
+    default=128,
     type=int,
     help='Number of folds (corresponding to both the number of training files and the number of testing files)',
 )
 parser.add_argument(
     '-ids_fn',
     dest='ids_fn',
-    default='../../house_videos/house-ids.csv',
+    default=os.path.join(os.environ['DATA_DIR'], 'folds_train_nonempty.csv'),
     type=str,
     help='We will use these IDs. you probably should filter them to mkae sure they all at least have the right files. can start with gs://'
 )
 parser.add_argument(
     '-out_folder',
     dest='out_folder',
-    default="../../tvqa_records",
+    default=os.environ['TFRECORDS_PATH'],
     type=str,
     help='Output folder to use. You can start this with gs:// and we\'ll put it on google cloud.'
 )
@@ -102,14 +95,14 @@ parser.add_argument(
 parser.add_argument(
     '-log_folder',
     dest='log_folder',
-    default="./",
+    default="logs/",
     type=str,
     help='Log folder to use. You can start this with gs:// and we\'ll put it on google cloud.'
 )
 parser.add_argument(
     '-ckpt',
     dest='ckpt',
-    # default='mobilenetv2_filter_model_coco_82ptacc.pth.tar',
+    default='mobilenetv2_filter_model_coco_82ptacc.pth.tar',
     type=str,
     help='checkpoint location. The checkpoint we used is at gs://merlot/video_filter_cnn/mobilenetv2_filter_model_coco_82ptacc.pth.tar - you might want to download that first'
 )
@@ -145,7 +138,6 @@ parser.add_argument(
 args = parser.parse_args()
 
 # gclient = storage.Client()
-# bucket = gclient.get_bucket(args.bucket)
 encoder = get_encoder()
 
 NUM_CHUNKS = args.num_chunks
@@ -180,25 +172,15 @@ MIN_TOKS_WINDOW = 8
 OK_TOKS_MULTIWINDOW = 16 # If N windows have this many tokens then break
 
 
-# if args.ckpt is not None:
-# Load mobilenet model
-model = models.MobileNetV2(num_classes=81)
-# model.load_state_dict({k[7:]: v for k, v in torch.load(args.ckpt,
-                                                        # map_location=torch.device('cpu'))['state_dict'].items()})
-model.features[0][0].padding = (0, 0)
-model.features[0][0].stride = (1, 1)  # Now it expects [114, 114] images
-model.eval()
+if args.ckpt is not None:
+    # Load mobilenet model
+    model = models.MobileNetV2(num_classes=81)
+    model.load_state_dict({k[7:]: v for k, v in torch.load(args.ckpt,
+                                                           map_location=torch.device('cpu'))['state_dict'].items()})
+    model.features[0][0].padding = (0, 0)
+    model.features[0][0].stride = (1, 1)  # Now it expects [114, 114] images
+    model.eval()
 
-
-# STORAGE_DIR = tempfile.mkdtemp()
-
-
-# def _cleanup():
-#     if os.path.exists(STORAGE_DIR):
-#         shutil.rmtree(STORAGE_DIR)
-
-
-# atexit.register(_cleanup)
 
 
 def load_video(video_id):
@@ -207,7 +189,7 @@ def load_video(video_id):
     :param video_id:
     :return: a video OR none
     """
-    start = time.time()
+    fn_start = time.time()
     # try:
         # info_fn = os.path.join(STORAGE_DIR, 'info.json.gz')
         # iblob = bucket.blob(f'youtube_dump/{video_id}/{video_id}.v2.info.json.gz')
@@ -235,14 +217,36 @@ def load_video(video_id):
     # if 'en' not in transcripts:
     #     raise ValueError(f"'en' not in item['transcripts'] \n{item}")
     # item['transcripts'] = transcripts
-    sub_fn = os.path.join('/data/tvqa_full/tvqa_subtitles', video_id[:-3] + 'srt')
+    def _count_vowels(word):
+        return len(re.findall('a|e|i|o|u', word.lower()))
+
+    sub_fn = os.path.join(os.environ["TRANSCRIPT_PATH"], video_id + '-trimmed.en.vtt')
     subs = pysrt.open(sub_fn)
-    data = {"time": [], "lines": []}
-    for sub in subs:
+    data = {"word": [], "start": [], "end": []}
+    total_subs = len(subs)
+    for i, sub in enumerate(subs):
+        start = sub.start.to_time()
+        start_ms = start.hour*3600000 + start.minute*60000 + start.second*1000 + start.microsecond*0.001
+        start_s = start_ms / 1000
+        end = sub.end.to_time()
+        end_ms = end.hour*3600000 + end.minute*60000 + end.second*1000 + end.microsecond*0.001
+        end_s = end_ms / 1000
+        if i == total_subs - 1:
+            item['duration'] = end_s
         lines = sub.text
-        times = sub.duration
-        data["time"].append(times.to_time())
-        data["lines"].append(lines)
+        duration = end_s - start_s
+        num_vow_line = _count_vowels(lines)
+        if (num_vow_line == 0):
+            continue
+        duration_per_vow = duration / num_vow_line
+        for word in lines.split():
+            num_vow = _count_vowels(word)
+            end_s = start_s + duration_per_vow * float(num_vow)
+
+            data['word'].append(word)
+            data['start'].append(start_s)
+            data['end'].append(end_s)
+            start_s = end_s
 
     item['transcripts'] = data
 
@@ -269,7 +273,7 @@ def load_video(video_id):
     #     raise ValueError("{} has a length variance of {:.3f}".format(item['id'], len_variance))
     item['transcript_vtt'] = vtt
 
-    video_fn = os.path.join("../../house_videos", video_id) #os.path.join(STORAGE_DIR, 'video.mp4')
+    video_fn = os.path.join(os.environ['VIDEO_PATH'], video_id + '_trimmed-out.mp4') #os.path.join(STORAGE_DIR, 'video.mp4')
     # vblob = bucket.blob(f'youtube_dump/{video_id}/{video_id}.mp4')
     # if not vblob.exists():
     #     return None
@@ -280,7 +284,7 @@ def load_video(video_id):
                                 capture_output=True, shell=True, text=True).stdout
     if len(stream_txt) == 0 or 'codec_type=audio' not in stream_txt:
         return None
-    item['_te'] = time.time() - start
+    item['_te'] = time.time() - fn_start
     return item
     # except (Exception, StopIteration) as e:
     #     print(str(e), flush=True)
@@ -413,8 +417,8 @@ def video_chunk_iterator():
             continue
 
         # Load audio in background
-        audio_fn = os.path.join("/data/tvqa_full/tvqa_audios/uncompressed/house/house_audios", item['id'][:-3] + "mp3") # os.path.join(STORAGE_DIR, 'audio.wav')
-        video_fn = os.path.join("../../house_videos", item['id']) # os.path.join(STORAGE_DIR, 'video.mp4')
+        audio_fn = os.path.join(os.environ['WAV_PATH'], item['title'] + '_trimmed-out.wav') # os.path.join(STORAGE_DIR, 'audio.wav')
+        video_fn = os.path.join(os.environ['VIDEO_PATH'], item['title'] + '_trimmed-out.mp4') # os.path.join(STORAGE_DIR, 'video.mp4')
         ffmpeg_process = subprocess.Popen(['ffmpeg', '-y', '-i', video_fn, '-ac', '1', '-ar', '22050',
                                            audio_fn,
                                            ],
@@ -426,7 +430,7 @@ def video_chunk_iterator():
         frames = extract_frames_from_video(video_file=video_fn,
                                            times=timesteps, use_multithreading=True, info=item)
         if frames is None:
-            print("Couldn't extract frames from video {}".format(item['id']), flush=True)
+            print("Couldn't extract frames from video {}".format(item['title']), flush=True)
             continue
         trg_size = get_size_for_resize((frames.shape[2], frames.shape[1]), shorter_size_trg=288,
                                        longer_size_max=512)
@@ -482,9 +486,7 @@ def video_chunk_iterator():
         # Get everything needed for chunks to work on their own
         # dict_keys(['start_time', 'end_time', 'playback_speed', 'rows', 'frame', 'spectrogram', 'spectrogram_width'])
 
-        description = encoder.encode(item['description']).ids
         title = encoder.encode(item['title']).ids
-        tags = encoder.encode(', '.join(item['tags'])).ids
 
         meta_info = {k: item[k] for k in ['channel_id', 'view_count', 'average_rating',
                                           '_avg_cosine_sim', '_num_coco_objects_expectation', 'upload_date',
@@ -509,10 +511,8 @@ def video_chunk_iterator():
             chunk['tok_ids'] = bpe_tokens
 
             chunk['meta'] = meta_info
-            chunk['youtube_id'] = item['id']
-            chunk['description'] = description
+            chunk['youtube_id'] = item['title']
             chunk['title'] = title
-            chunk['tags'] = tags
         yield chunks
 
 
@@ -704,7 +704,7 @@ def buffered_chunk_iterator():
         yield chunk_group
 
 train_file = os.path.join(args.out_folder,
-                          '{}{:05d}of{:05d}.tfrecord'.format(args.split_name, args.fold, args.num_folds))
+                          '{}{:03d}of{:03d}.tfrecord'.format(args.split_name, args.fold, args.num_folds))
 
 num_written = 0
 video_set = set()
@@ -741,8 +741,6 @@ with GCSTFRecordWriter(train_file, buffer_size=10000, auto_close=False) as train
                 'video_src_idx': int64_feature(video_idx),
 
                 'title': int64_list_feature(c_i['title'] if is_first else []),
-                'tags': int64_list_feature(c_i['tags'] if is_first else []),
-                'description': int64_list_feature(c_i['description'] if is_first else []),
                 'meta': bytes_feature(json.dumps(c_i['meta']).encode('utf-8') if is_first else b''),
 
                 'playback_speed': int64_feature(c_i['playback_speed']),
@@ -785,7 +783,7 @@ with open('log.csv', 'w') as f:
         writer.writerow({'video_id': x})
 
 log_file_out = os.path.join(args.log_folder,
-                          '{}{:05d}of{:05d}.csv'.format(args.split_name, args.fold, args.num_folds))
+                          '{}{:03d}of{:03d}.csv'.format(args.split_name, args.fold, args.num_folds))
 # if log_file_out.startswith('gs://' + args.bucket_name):
 #     blob_fn = '/'.join(log_file_out.split('/')[3:])
 #     print(f"Uploading to {blob_fn}", flush=True)
