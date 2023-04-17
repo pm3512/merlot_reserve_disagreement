@@ -4,7 +4,7 @@ Convert TVQA into tfrecords
 import sys
 import csv
 
-# sys.path.append('/work/sheryl/merlot_reserve')
+sys.path.append('/home/aobolens/merlot_reserve')
 import argparse
 import hashlib
 import io
@@ -310,9 +310,9 @@ def parse_item(item):
     except:  # Keyboardinterrupt
         ffmpeg_process.kill()
         raise
-    # if not os.path.exists(audio_fn):
-    #     import ipdb
-    #     ipdb.set_trace()
+    if not os.path.exists(audio_fn):
+        import ipdb
+        ipdb.set_trace()
     ffmpeg_process.kill()
     sr, waveform = wavfile.read(audio_fn, mmap=False)
     waveform = waveform.astype('float32')
@@ -342,7 +342,6 @@ def parse_item(item):
     show_subname = item['vid_name'] + "-trimmed"
     sub_fn = os.path.join(os.environ["TRANSCRIPT_PATH"], show_subname + '.en.vtt')
     if not os.path.exists(sub_fn):
-        print(sub_fn)
         import ipdb
         ipdb.set_trace()
 

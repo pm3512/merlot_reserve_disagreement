@@ -9,7 +9,7 @@ import make_frames
 import make_json
 from dotenv import load_dotenv
 
-load_dotenv('/work/sheryl/merlot_reserve/.env')
+load_dotenv('/home/aobolens/merlot_reserve/.env')
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -41,11 +41,7 @@ if args.frames:
     make_frames.video_to_frames(os.environ["VIDEO_PATH"], os.environ["DATA_DIR"])
 
 if args.json:
-    # make json for train vids
-    make_json.make_json_for(os.environ["TRAIN_VIDS_PATH"], 
-                os.path.join(os.environ["DATA_DIR"], "siq1_train.jsonl"), 
-                os.environ["QA_PATH"], args.binary)
-    # make json for val vids
-    make_json_for(os.environ["VAL_VIDS_PATH"], 
-                os.path.join(os.environ["DATA_DIR"], "siq1_val.jsonl"), 
+    # make json for train and val vids
+    make_json.make_json_for(os.environ["VIDEO_PATH"], 
+                os.environ["DATA_DIR"],
                 os.environ["QA_PATH"], args.binary)

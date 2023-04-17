@@ -27,7 +27,7 @@ def subtract_old_weights(weight_decay: float = 0.0, mask=None) -> GradientTransf
         return DecayedWeightsDeltaState(orig_params=jax.tree_map(lambda x: x.astype(jnp.bfloat16), params))
 
     def update_fn(updates, state, params=None):
-        updates = jax.tree_multimap(lambda g, orig_param: g - weight_decay * orig_param.astype(g.dtype),
+        updates = jax.tree_map(lambda g, orig_param: g - weight_decay * orig_param.astype(g.dtype),
                                     updates, state.orig_params)
         return updates, state
 
@@ -130,7 +130,7 @@ def finetune_train_step(state: train_state.TrainState, batch,
                 return loss_fn(state, params, {k: v[None] for k, v in microbatch.items()})
             grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
             (loss, loss_info), grads = grad_fn(params)
-            grads = jax.tree_multimap(lambda a, b: a + b, old_grads, grads)
+            grads = jax.tree_map(lambda a, b: a + b, old_grads, grads)
             return grads, (loss, loss_info)
 
         grads, (loss, loss_info) = jax.lax.scan(_microbatch,
@@ -168,7 +168,7 @@ def finetune_train_step(state: train_state.TrainState, batch,
             aig = [[(j * 8 + i) for i in range(8)] for j in range(jax.device_count() // 8)]
             update = jax.lax.all_gather(update, axis_name='batch', axis_index_groups=aig)
             return jnp.reshape(update, param.shape)
-    updates = jax.tree_multimap(_fix_grad, updates, state.params)
+    updates = jax.tree_map(_fix_grad, updates, state.params)
 
     # do the final few updates -- weight decay, scale by schedule, scale by LR. as weight decay requires
     # existing params

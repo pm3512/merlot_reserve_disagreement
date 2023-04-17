@@ -4,16 +4,24 @@ import re
 import subprocess
 import sys
 import random
+from socialiq_std_folds import standard_train_fold, standard_valid_fold
 
-sys.path.append("/work/sheryl")
+sys.path.append(os.getcwd())
 
 # from raw import socialiq_std_folds
 
 def make_json_for(vids_path, json_file_path, qa_path, binary_task):
     vids = os.listdir(vids_path)
-    file_name = open(json_file_path, "w")
+    train_file = open(os.path.join(json_file_path, "siq1_train.jsonl"), "w")
+    val_file = open(os.path.join(json_file_path, "siq1_val.jsonl"), "w")
 
     for vid in vids:
+        vid = vid[:-len('_trimmed-out.mp4')]
+        if vid in standard_train_fold:
+            f = train_file
+        else:
+            assert vid in standard_valid_fold
+            f = val_file
         vid_name = vid + "_trimmed-out.mp4"
         vid_length = subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=duration', '-of', 'default=noprint_wrappers=1:nokey=1', os.path.join(vids_path, vid_name)])
         
@@ -89,7 +97,7 @@ def make_json_for(vids_path, json_file_path, qa_path, binary_task):
                                     vid_dict["a"+str(j)] = curr_ans
                                     if curr_ans in all_correct_ans:
                                         vid_dict['answer_idx'] = j
-                                file_name.write(json.dumps(vid_dict) + "\n")
+                                f.write(json.dumps(vid_dict) + "\n")
                         if binary_task:
                             # two answers - binary q&a task
                             product = [[a, b] for a in all_correct_ans for b in all_incorrect_ans]
@@ -101,7 +109,7 @@ def make_json_for(vids_path, json_file_path, qa_path, binary_task):
                                     vid_dict['answer_idx'] = 0
                                 else:
                                     vid_dict['answer_idx'] = 1
-                                file_name.write(json.dumps(vid_dict) + "\n")
+                                f.write(json.dumps(vid_dict) + "\n")
 
                             # print(vid_dict)
                         vid_file.seek(pos)

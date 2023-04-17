@@ -26,6 +26,7 @@ import torchvision.transforms as transforms
 # import zstandard
 from data.clean_text import clean_text
 import pysrt
+from itertools import cycle
 import dotenv
 dotenv.load_dotenv()
 
@@ -607,78 +608,82 @@ def _allpairs_cosine_similarity(x):
     cosine_sim = pairwise_numerator / denominator
     return cosine_sim
 
-# def text_iterator(num_seqs = 4, text_len=512):
-#     """
-#     This is for downloading the pile, jointly with the rest
-#     if not using the pile you don't need this function
-#     :param num_seqs:
-#     :param text_len:
-#     :return:
-#     """
-#     zst_fn = os.path.join(STORAGE_DIR, 'txt.jsonl.zst')
-#     file_id = args.fold % 16410
+def text_iterator(num_seqs = 4, text_len=512):
+    """
+    This is for downloading the pile, jointly with the rest
+    if not using the pile you don't need this function
+    :param num_seqs:
+    :param text_len:
+    :return:
+    """
+    random_file = os.path.join(os.environ['DATA_DIR'], 'random_text.txt')
 
-#     NUM_SKIPEVERY = args.num_folds // 16410 + 1
+    def sub_iterator():
+        current = []
+        with open(random_file, 'r') as fh:
+            for line in fh:
+                text = clean_text(line.strip())
+                x_enc = [encoder.token_to_id('<|START|>')] + encoder.encode(text).ids
+                x_enc.append(encoder.token_to_id('<|END|>'))
+                current.extend(x_enc)
 
-#     skip_every = (args.fold // 16410) % NUM_SKIPEVERY
-#     # blob = bucket.blob(f'thepile/fold{file_id:05d}of16410.jsonl.zst')
-#     # blob.download_to_filename(zst_fn)
+                while len(current) >= text_len:
+                    yield current[:text_len]
+                    current = current[text_len:]
+        '''
+        current = []
+        ok_sources = set(['Pile-CC', 'FreeLaw', 'StackExchange', 'PubMed Abstracts', 'OpenWebText2', 'Wikipedia (en)',
+                      'HackerNews', 'NIH ExPorter', 'USPTO Backgrounds', 'OpenSubtitles', 'Books3', 'Gutenberg (PG-19)',
+                      'BookCorpus2'])
 
-#     def sub_iterator():
-#         current = []
-#         ok_sources = set(['Pile-CC', 'FreeLaw', 'StackExchange', 'PubMed Abstracts', 'OpenWebText2', 'Wikipedia (en)',
-#                       'HackerNews', 'NIH ExPorter', 'USPTO Backgrounds', 'OpenSubtitles', 'Books3', 'Gutenberg (PG-19)',
-#                       'BookCorpus2'])
+        with open(zst_fn, 'rb') as fh:
+            dctx = zstandard.ZstdDecompressor()
+            with dctx.stream_reader(fh, read_size=16384) as reader:
+                text_stream = io.TextIOWrapper(reader, encoding='utf-8', errors='ignore')
+                for j, line in enumerate(text_stream):
+                    if (j % NUM_SKIPEVERY) == skip_every:
+                        try:
+                            X = json.loads(line)
+                        except json.decoder.JSONDecodeError:
+                            print("ERROR JSON DECODE", flush=True)
+                            continue
 
-#         with open(zst_fn, 'rb') as fh:
-#             dctx = zstandard.ZstdDecompressor()
-#             with dctx.stream_reader(fh, read_size=16384) as reader:
-#                 text_stream = io.TextIOWrapper(reader, encoding='utf-8', errors='ignore')
-#                 for j, line in enumerate(text_stream):
-#                     if (j % NUM_SKIPEVERY) == skip_every:
-#                         try:
-#                             X = json.loads(line)
-#                         except json.decoder.JSONDecodeError:
-#                             print("ERROR JSON DECODE", flush=True)
-#                             continue
+                        # Options ['Pile-CC', 'FreeLaw', 'StackExchange', 'YoutubeSubtitles', 'Github',
+                        # 'PubMed Abstracts', 'PubMed Central', 'OpenWebText2', 'Wikipedia (en)', 'HackerNews',
+                        # 'NIH ExPorter', 'USPTO Backgrounds', 'ArXiv', 'Enron Emails', 'DM Mathematics',
+                        # 'OpenSubtitles', 'Books3', 'Gutenberg (PG-19)', 'Ubuntu IRC', 'EuroParl', 'PhilPapers',
+                        # 'BookCorpus2']
 
-#                         # Options ['Pile-CC', 'FreeLaw', 'StackExchange', 'YoutubeSubtitles', 'Github',
-#                         # 'PubMed Abstracts', 'PubMed Central', 'OpenWebText2', 'Wikipedia (en)', 'HackerNews',
-#                         # 'NIH ExPorter', 'USPTO Backgrounds', 'ArXiv', 'Enron Emails', 'DM Mathematics',
-#                         # 'OpenSubtitles', 'Books3', 'Gutenberg (PG-19)', 'Ubuntu IRC', 'EuroParl', 'PhilPapers',
-#                         # 'BookCorpus2']
+                        # for k, vs in story_by_meta.items():
+                        #     print(k + '\n=========\n')
+                        #     for v_i, v in enumerate(vs[:10]):
+                        #         print(f"{v_i}) {clean_text(v)[:128]}", flush=True)
+                        #     print('\n\n')
 
-#                         # for k, vs in story_by_meta.items():
-#                         #     print(k + '\n=========\n')
-#                         #     for v_i, v in enumerate(vs[:10]):
-#                         #         print(f"{v_i}) {clean_text(v)[:128]}", flush=True)
-#                         #     print('\n\n')
+                        # story_by_meta[X['meta']['pile_set_name']].append(X['text'])
+                        if X['meta']['pile_set_name'] not in ok_sources:
+                            continue
 
-#                         # story_by_meta[X['meta']['pile_set_name']].append(X['text'])
-#                         if X['meta']['pile_set_name'] not in ok_sources:
-#                             continue
+                        text = clean_text(X['text'])
 
-#                         text = clean_text(X['text'])
+                        x_enc = [encoder.token_to_id('<|START|>')] + encoder.encode(text).ids
+                        x_enc.append(encoder.token_to_id('<|END|>'))
+                        current.extend(x_enc)
 
-#                         x_enc = [encoder.token_to_id('<|START|>')] + encoder.encode(text).ids
-#                         x_enc.append(encoder.token_to_id('<|END|>'))
-#                         current.extend(x_enc)
+                        while len(current) >= text_len:
+                            yield current[:text_len]
+                            current = current[text_len:]
 
-#                         while len(current) >= text_len:
-#                             yield current[:text_len]
-#                             current = current[text_len:]
+                        if len(current) <= (text_len // 8):
+                            current = []
+        '''
 
-#                         if len(current) <= (text_len // 8):
-#                             current = []
-
-#     buffer = []
-#     for seq in sub_iterator():
-#         buffer.append(seq)
-#         if len(buffer) == num_seqs:
-#             yield buffer
-#             buffer = []
-
-#     raise ValueError("Consumed text iterator too early")
+    buffer = []
+    for seq in sub_iterator():
+        buffer.append(seq)
+        if len(buffer) == num_seqs:
+            yield buffer
+            buffer = []
 
 def buffered_chunk_iterator():
     for chunk_group in grouped_iterator(video_chunk_iterator, group_size=NUM_CHUNKS, max_items=NUM_CHUNKS * 10):
@@ -712,7 +717,7 @@ tokens_written = []
 st = time.time()
 with GCSTFRecordWriter(train_file, buffer_size=10000, auto_close=False) as train_writer:
     # for chunks, txt in zip(buffered_chunk_iterator(), text_iterator(num_seqs=args.num_text_seqs, text_len=args.text_len)):
-    for chunks in buffered_chunk_iterator():
+    for chunks, txt in zip(buffered_chunk_iterator(), cycle(text_iterator(num_seqs=args.num_text_seqs, text_len=args.text_len))):
         feats = {}
         video_idx = -1
         for i, c_i in enumerate(chunks):
@@ -751,7 +756,7 @@ with GCSTFRecordWriter(train_file, buffer_size=10000, auto_close=False) as train
                 'tok_start_times': float_list_feature(c_i['tok_start_times']),
                 'tok_end_times': float_list_feature(c_i['tok_end_times']),
 
-                # 'random_text': int64_list_feature(txt[i] if i < args.num_text_seqs else []),
+                'random_text': int64_list_feature(txt[i] if i < args.num_text_seqs else []),
             }
             for k, v in current_feats.items():
                 feats[f'c{i:02d}/{k}'] = v

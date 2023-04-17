@@ -53,7 +53,6 @@ parser.add_argument(
     '-ckpt',
     help='checkpoint to use',
     type=str,
-    default=os.environ["CHKPT_PATH"],
 )
 parser.add_argument(
     '--lr',
@@ -89,7 +88,7 @@ parser.add_argument(
     '-wandb_name',
     help='wandb_name',
     type=str,
-    default='siq-finetune',
+    default='agreement-reweight',
 )
 parser.add_argument(
     '-val_batch_size',
@@ -110,8 +109,8 @@ with open(args.pretrain_config_file, 'r') as f:
     config = yaml.load(f, yaml.FullLoader)
 
 
-config['data']['train_fns'] = os.path.join(os.environ["TFRECORDS_PATH"], "train{:03d}of" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
-config['data']['num_train_files'] = os.environ["NUM_TRAIN_TFRECORDS"]
+config['data']['train_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "train{:03d}of" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
+config['data']['num_train_files'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
 config['data']['num_answers'] = 4
 config['data']['random_scale_max'] = 1.1
 config['data']['random_scale_min'] = 1.0
@@ -119,7 +118,7 @@ config['data']['num_segments'] = 7
 
 config['device']['batch_size'] = 8
 config['device']['prefetch_size'] = 0
-config['device']['n_fns_per_cycle'] = os.environ["NUM_TRAIN_TFRECORDS"]
+config['device']['n_fns_per_cycle'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
 
 NUM_EPOCH = args.ne
 TRAIN_SIZE = 17494
@@ -158,7 +157,7 @@ if args.output_name != '':
     tags.append(args.output_name)
 # if (jax.process_index() == 0):
 #     import wandb
-wandb.init(config=config, project=args.wandb_name, entity='sherylm', notes="Loaded from "+cfg_name, tags=tags)
+wandb.init(config=config, project=args.wandb_name, notes="Loaded from "+cfg_name, tags=tags)
 # else:
 # wandb = None
 
@@ -328,8 +327,8 @@ def val_epoch(state: train_state.TrainState):
     :return:
     """
     val_config = deepcopy(config)
-    val_config['data']['val_fns'] = os.path.join(os.environ["TFRECORDS_PATH"], "val{:03d}of" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
-    val_config['data']['num_val_files'] = os.environ["NUM_VAL_TFRECORDS"]
+    val_config['data']['val_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "val{:03d}of0" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
+    val_config['data']['num_val_files'] = int(os.environ["NUM_VAL_TFRECORDS"])
     val_config['data']['do_random_scale'] = False
     val_config['data']['batch_size'] = args.val_batch_size
 
@@ -374,6 +373,13 @@ train_metrics = []
 log_every = config['device'].get('commit_every_nsteps', 50)
 time_elapsed = []
 num_batch = 0
+
+'''
+val_info = val_epoch(state)
+print(f"Info: {pd.Series(val_info)}\n~\n", flush=True)
+if wandb is not None:
+    wandb.log({'joint_acc_val': val_info['joint_acc']}, step=0, commit=True)
+'''
 
 # the + 1 is because for some reason it crashes at the end otherwise. why? idk/
 for n in range(config['optimizer']['num_train_steps']+100):

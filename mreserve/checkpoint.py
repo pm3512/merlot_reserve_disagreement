@@ -113,6 +113,7 @@ def load_checkpoint(path: str, state: Optional[train_state.TrainState] = None, s
         state = _compress_state(state)
 
     state = checkpoints.restore_checkpoint(ckpt_dir=path, target=state, step=step, prefix='ckpt_', parallel=True)
+    print(f'Successfully restored checkpoint from {path}' , flush=True)
     state = _decompress_state(state)
     if use_bfloat16_weights:
         state = state.replace(params=f32_to_bf16(state.params))

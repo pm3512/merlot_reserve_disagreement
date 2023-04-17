@@ -20,6 +20,8 @@ import argparse
 import numpy as np
 import functools
 import time
+import wandb
+
 
 
 jax.config.update('jax_log_compiles', True)
@@ -39,15 +41,28 @@ parser.add_argument(
     '-output_dir',
     help='Override output directory (otherwise we do whats in the config file and add timestamp).',
     dest='output_dir',
-    default='',
+    default='/home/aobolens/ckpt',
     type=str,
 )
 
 parser.add_argument(
-    '-disable_wandb',
-    help='dont log this result on weights and biases',
-    dest='disable_wandb',
-    action='store_true',
+    '-wandb_name',
+    help='wandb_name',
+    type=str,
+    default='agreement-reweight',
+)
+
+parser.add_argument(
+    '--threshold',
+    help='If delta loss is below this threshold, datapoint is ignored',
+    type=float,
+    default=0.,
+)
+
+parser.add_argument(
+    '--reweight',
+    help='do reweighting based on agreement',
+    action='store_true'
 )
 args = parser.parse_args()
 
@@ -68,14 +83,20 @@ with open(args.config_file, 'r') as f:
     elif args.output_dir == '':
         config['device']['output_dir'] = os.path.join(config['device']['output_dir'], seattle_time)
     else:
+        config['device']['output_subdir'] = os.path.join(config['device']['output_dir'], seattle_time)
         config['device']['output_dir'] = args.output_dir
+    config['model']['reweight'] = args.reweight
+    config['model']['threshold'] = args.threshold
 
 config['_path'] = args.config_file
+wandb.init(config=config, project=args.wandb_name, tags=['pretrain'])
+'''
 if (jax.process_index() == 0) and (not is_on_gpu) and (not args.disable_wandb):
-    import wandb
+    #import wandb
     #wandb.init( add your info here )
 else:
     wandb = None
+'''
 
 ds_train_iter = input_fn_builder(config)
 dummy_batch = next(ds_train_iter)
@@ -103,18 +124,45 @@ state = load_checkpoint(state=state, path=config['device']['output_dir'], step=N
 start_step = int(state.step)
 state = jax_utils.replicate(state)
 
-p_train_step = jax.pmap(functools.partial(train_step, use_bfloat16_grads=config['model']['use_bfloat16'],),
+p_train_step = jax.pmap(functools.partial(train_step, use_bfloat16_grads=config['model']['use_bfloat16'],
+                                          reweight=config['model']['reweight'], t=config['model']['threshold']),
                         axis_name='batch', donate_argnums=(0, 1,))
 
 train_metrics = []
 time_elapsed = []
 num_train_steps = config['optimizer'].get('num_train_steps_override', config['optimizer']['num_train_steps'])
 log_every = config['device'].get('commit_every_nsteps', 50)
-
+wandb_logs = {
+    'loss_vision': [],
+    'loss_no_vision': [],
+    'delta_loss': []
+}
+if config['model']['reweight']:
+    wandb_logs['reweighted'] = []
 for n in range(num_train_steps):
     st = time.time()
     batch = next(ds_train_iter)
     state, loss_info = p_train_step(state, batch)
+    if config['model']['reweight']:
+        (loss_info, loss, loss_nv, loss_reweighted) = loss_info
+    else:
+        (loss_info, loss, loss_nv) = loss_info
+    for i in range(config['device']['batch_size']):
+
+        wandb_logs['loss_vision'].append([loss[i].item()])
+        wandb_logs['loss_no_vision'].append([loss_nv[i].item()])
+        wandb_logs['delta_loss'].append([loss_nv[i].item() - loss[i].item()])
+        if config['model']['reweight']:
+            wandb_logs['reweighted'].append([loss_reweighted[i].item()])
+
+        log_data = {
+            'loss_vision': loss[i],
+            'loss_no_vision': loss_nv[i],
+            'delta_loss': loss_nv[i] - loss[i],
+        }
+        if config['model']['reweight']:
+            log_data['reweighted'] = loss_reweighted[i]
+        wandb.log(log_data)
 
     # Async transfer. Basically we queue the last thing, then log the thing from `log_every` iterations ago
     if jax.process_index() == 0:
@@ -125,11 +173,10 @@ for n in range(num_train_steps):
         if step_for_logging >= 0:
             train_metrics[step_for_logging] = {k: float(v) for k, v in train_metrics[step_for_logging].items()}
 
-            if wandb is not None:
-                wandb.log(train_metrics[step_for_logging], step=step_for_logging + start_step, commit=(n + 1) % log_every == 0)
+            wandb.log(train_metrics[step_for_logging], commit=(n + 1) % log_every == 0)
 
     if (n + 1) % config['device']['iterations_per_loop'] == 0:
-        save_checkpoint(state, path=config['device']['output_dir'])
+        save_checkpoint(state, path=config['device']['output_subdir'])
         print(f"Saving @iter {n:03d}.", flush=True)
         temps = {}
         for i, k in enumerate(['imgs_to_audio', 'text_to_audio', 'stuff_to_span']):
@@ -143,3 +190,8 @@ for n in range(num_train_steps):
         tsum = sum(time_elapsed)
         print("Completed 100 batches in {:.3f}sec, avg {:.3f} it/sec".format(tsum, 100.0/tsum), flush=True)
         time_elapsed = []
+
+for k, v in wandb_logs.items():
+    data = v
+    table = wandb.Table(data=data, columns=[k])
+    wandb.log({k: wandb.plot.histogram(table, k, title=None)})

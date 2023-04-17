@@ -150,7 +150,6 @@ def preprocess_tvqa(record, config):
         'qa_query': tf.io.VarLenFeature(tf.int64),
         'qa_label': tf.io.FixedLenFeature((), tf.int64, 1),
         'num_frames': tf.io.FixedLenFeature((), tf.int64, 1),
-        'speakers': tf.io.VarLenFeature(tf.float32),
     }
     for i in range(config['num_answers']):
         k2f[f'qa_choice_{i}'] = tf.io.VarLenFeature(tf.int64)
@@ -318,7 +317,7 @@ def finetune_val_input_fn_builder(config, preprocessor_type):
     batch_size = config['device']['batch_size']
 
     matching_fns = []
-    for i in range(config['data']['num_val_files']):
+    for i in range(int(config['data']['num_val_files'])):
         matching_fns.append(config['data']['val_fns'].format(i))
 
     dataset = tf.data.TFRecordDataset(matching_fns, num_parallel_reads=None)
@@ -362,3 +361,13 @@ def finetune_val_input_fn_builder(config, preprocessor_type):
             item[k] = item[k].reshape([num_devices, batch_size // num_devices] + list(item[k].shape[1:]))
 
         yield ids, item
+
+
+'''
+config = {'train_fns': '/home/aobolens/Social_IQ/raw/tfrecords/train{:03d}of128.tfrecord', 'num_train_files': 128, 'use_audio_token_prob': 0.5, 'random_scale_max': 1.1, 'random_scale_min': 1.0, 'fft_hop_length': 588, 'fft_window_size': 1536, 'num_mels': 64, 'sample_rate': 22050, 'spec_size': 188, 'mask_rate': 0.25, 'num_audio2text_seqs': 1, 'num_text2audio_seqs': 1, 'num_text_seqs': 1, 'num_text_seqs_in_record': 1, 'num_segments': 7, 'num_segment_groups': 2, 'num_audio_subsegments': 3, 'seq_len': 640, 'lang_seq_len': 256, 'num_text_spans_to_include': 48, 'text_span_budget': 38, 'num_answers': 4, 'val_fns': '/home/aobolens/Social_IQ/raw/tfrecords/val{:03d}of016.tfrecord', 'num_val_files': 16, 'do_random_scale': False, 'batch_size': 32, 'hidden_size': 768, 'joint_num_layers': 12, 'use_bfloat16': True, 'audio_num_layers': 12, 'audio_patch_size': 2, 'audio_seq_length': 60, 'audio_token_length': 6, 'output_grid': [18, 32], 'vit_patch_size': 16, 'vit_pooling_ratio': 2, 'vit_num_layers': 12, 'span_num_layers': 4, 'text_span_length': 15}
+dataset = tf.data.TFRecordDataset(['/home/aobolens/Social_IQ/raw/tfrecords/val000of016.tfrecord'], num_parallel_reads=1)
+def prep(x):
+    return preprocess_tvqa(x, config)
+for x in dataset:
+    prep(x)
+'''

@@ -4,8 +4,8 @@
 # bsize of 1024 so 75596 is one epoch
 
 data:
-  train_fns: "gs://${YOURPATHHERE}/train{:05d}of32800.tfrecord"
-  num_train_files: 32768
+  train_fns: "/home/aobolens/Social_IQ/raw/siq/train{:03d}of128.tfrecord"
+  num_train_files: 128
 
   use_audio_token_prob: 0.5
 
@@ -69,7 +69,7 @@ model:
 device:
   use_tpu: True
   num_tpu_cores: 512
-  output_dir: "gs://${YOURPATHHERE}/flagship~size=base~lr=4e-4/"
+  output_dir: "/home/aobolens/ckpt/ckpt_t2"
   batch_size: 1024
   iterations_per_loop: 7500
   commit_every_nsteps: 50

@@ -1,0 +1,53 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "cwd": "${fileDirname}",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "process.py",
+            "type": "python",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/data",
+            "program": "process.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "-fold", "0"
+            ]
+        },
+        {
+            "name": "train.py",
+            "type": "python",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/pretrain",
+            "program": "train.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "configs/pretrain_base.yaml"
+            ]
+        },
+        {
+            "name": "prep_data_siq.py",
+            "type": "python",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/finetune/tvqa",
+            "program": "prep_data_siq.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "-fold", "0", "-num_folds", "128"
+            ]
+        }
+    ]
+}

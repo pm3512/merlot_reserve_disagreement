@@ -2,6 +2,7 @@
 Pretraining dataloader
 """
 import sys
+import os
 
 sys.path.append('../')
 import time
@@ -19,6 +20,9 @@ from copy import deepcopy
 import random
 from collections import defaultdict
 import warnings
+import dotenv
+
+dotenv.load_dotenv("../.env")
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -29,25 +33,12 @@ encoder = get_encoder()
 ###################################
 segment_k2f = {
     'image/encoded': tf.io.FixedLenFeature((), tf.string, default_value=''),
-    'image/format': tf.io.FixedLenFeature((), tf.string, default_value='jpeg'),
-    'image/key/sha256': tf.io.FixedLenFeature((), tf.string, default_value=''),
-    'image/height': tf.io.FixedLenFeature((), tf.int64, 1),
-    'image/width': tf.io.FixedLenFeature((), tf.int64, 1),
 
     'spectrogram/encoded': tf.io.FixedLenFeature((), tf.string, default_value=''),
-    'spectrogram/format': tf.io.FixedLenFeature((), tf.string, default_value='jpeg'),
-    'spectrogram/key/sha256': tf.io.FixedLenFeature((), tf.string, default_value=''),
-    'spectrogram/height': tf.io.FixedLenFeature((), tf.int64, 1),
-    'spectrogram/width': tf.io.FixedLenFeature((), tf.int64, 1),
     'spectrogram/magic_number': tf.io.FixedLenFeature((), tf.float32, 1),
 
     'youtube_id': tf.io.FixedLenFeature((), tf.string, default_value=''),
     'video_src_index': tf.io.FixedLenFeature((), tf.int64, 1),
-
-    'title': tf.io.VarLenFeature(tf.int64),
-    'tags': tf.io.VarLenFeature(tf.int64),
-    'description': tf.io.VarLenFeature(tf.int64),
-    'meta': tf.io.FixedLenFeature((), tf.string, default_value=''),
 
     'playback_speed': tf.io.VarLenFeature(tf.int64),
     'start_time': tf.io.FixedLenFeature((), tf.float32, 1),
@@ -69,7 +60,9 @@ def load_and_resize_img(encoded_jpg, config):
     P = config['vit_patch_size']
     h1, w1 = config['output_grid']
 
+    print('load_and_resize_img', flush=True)
     img = tf.image.decode_jpeg(encoded_jpg, channels=3)
+    print('done load', flush=True)
     img = tf.image.convert_image_dtype(img, dtype=tf.float32)
 
     img, this_image_info = resize_and_pad(img, (h1 * P, w1 * P),
@@ -93,7 +86,9 @@ def load_audio(x, config):
     encoded_audio, magic_number, playback_speed = x
     img = tf.image.decode_jpeg(encoded_audio, channels=1)
     img = tf.squeeze(img, 2)
+    print('before setshape')
     img.set_shape([config['num_mels'], config['spec_size']])
+    print('after setshape')
     img = tf.transpose(img)
 
     # Extract N sequences
@@ -474,9 +469,11 @@ def dataset_parser(record, config):
                     range(num_segments)]
 
     # Load images
+    print("Loading images", flush=True)
     encodeds = tf.stack([x['image/encoded'] for x in segment_list])
     features['images'] = tf.map_fn(functools.partial(load_and_resize_img, config=config),
                                    elems=encodeds, fn_output_signature=tf.float32)
+    print('loaded images', flush=True)
     if config.get('disable_imgs_dataloader', False):
         print("Disabling images from the dataloader level!!!", flush=True)
         features['images'] *= 0.0
@@ -619,17 +616,6 @@ def dataset_parser(record, config):
         matching_toks.append(tf.cond(use_audio_tokens, lambda: audio_subseg, lambda: text_subseg))
     matching_toks = tf.concat(matching_toks, 0)
 
-    aux_info = tf.concat([
-        [START], encoder.encode('title:').ids, segment_list[0]['title'],
-        [START], encoder.encode('description:').ids, segment_list[0]['description'],
-        [START] + encoder.encode('tags:').ids, segment_list[0]['tags'], [END],
-    ], 0)
-    aux_info = tf.stack([aux_info, tf.zeros_like(aux_info) - 1, tf.zeros_like(aux_info) - 1], 1)
-
-    extra_space_for_desc = tf.maximum(max_text_seq_len - get_shape_list(matching_toks, 2)[0], 0)
-    aux_info = aux_info[:extra_space_for_desc]
-    matching_toks = tf.concat([aux_info, matching_toks], 0)
-
     features['audio_text_matching'] = pad_tokens_to_fixed_size(matching_toks, config['seq_len'])
 
     ####################### Random text
@@ -662,11 +648,17 @@ def dataset_parser(record, config):
                                                                                    use_v1_stats='ytt180m' in config['train_fns'])
 
         # 4x as often, pick something that only has characters we see in YouTube
+        print('got fake segments', flush=True)
         want_to_mask = tf.gather(token_is_valid_tf, tokens_ragged_i)
+        print('gathered', flush=True)
         mask_w = 0.2 + 0.8 * tf.cast(tf.reduce_all(want_to_mask, -1), dtype=tf.float32)
+        print('reduced', flush=True)
         do_mask_i = random_categorical_without_replacement(logits=tf.math.log(mask_w), num_samples=span_budget)
+        print('random', flush=True)
         do_mask_i = tf.sort(do_mask_i)
+        print('sorted', flush=True)
         spans_i, tokens_i = mask_tokens(tokens_ragged_i, do_mask_i, text_span_start_counter=counter, num_groups=1)
+        print('masked', flush=True)
 
         # Add in extra LHS and extra RHS if under max len
         tokens_i = tokens_i[0]
@@ -680,6 +672,7 @@ def dataset_parser(record, config):
         amt_rhs = tf.minimum(extra_rhs_len, (amt_needed+1) // 2)
         extra_rhs = tf.stack([extra_rhs[:amt_rhs], tokens_i[-1, 1] + tf.ones([amt_rhs], dtype=tf.int32), tf.zeros([amt_rhs], dtype=tf.int32)-1], 1)
         tokens_i = tf.concat([extra_lhs, tokens_i, extra_rhs], 0)
+        print('concatenated', flush=True)
 
         # OK now we pad to the length of the joint transformer
         tokens_i = pad_tokens_to_fixed_size(tokens_i, padded_seq_len=config['seq_len'])
@@ -701,7 +694,6 @@ def dataset_parser(record, config):
 
     # Video src idx per segment
     features['video_src_index'] = tf.cast(tf.stack([x['video_src_index'] for x in segment_list]), dtype=tf.int32)
-    features['meta'] = segment_list[0]['meta']
     features['youtube_id'] = segment_list[0]['youtube_id']
 
     if config.get('encode_meta', False):
@@ -709,6 +701,7 @@ def dataset_parser(record, config):
         features['meta'] = encode_string(features['meta'], 256)
 
 
+    print('done', flush=True)
     return features
 
 
@@ -776,7 +769,7 @@ def handle_batch(batched_tensor, num_devices=None, use_bfloat16=False):
             batched_tensor[k + '/text_ptr'] = x2[..., 2]
 
     # Delete if not in debug mode
-    for k in ['meta', 'youtube_id']:
+    for k in ['youtube_id']:
         if (num_devices is not None) and (batched_tensor[k].dtype == tf.string):
             batched_tensor.pop(k, None)
         else:
@@ -875,6 +868,7 @@ def make_dataset(config, fns, batch_size, num_devices=None, is_training=True):
     """
     merged_config = deepcopy(config['data'])
     merged_config.update(config['model'])
+    print(merged_config)
 
     num_parallel_reads = config['device'].get('num_parallel_reads', 4)
     num_parallel_reads = min(len(fns), num_parallel_reads) if isinstance(fns, list) else None
@@ -897,9 +891,12 @@ def make_dataset(config, fns, batch_size, num_devices=None, is_training=True):
     dataset = dataset.map(functools.partial(dataset_parser, config=merged_config),
                           num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
+    print("Dataset Parsed", flush=True)
     dataset = dataset.batch(batch_size=batch_size, drop_remainder=True)
+    print("Dataset Batched", flush=True)
     dataset = dataset.map(functools.partial(handle_batch, num_devices=num_devices,
                                             use_bfloat16=merged_config['use_bfloat16']))
+    print("Dataset Mapped", flush=True)
     return dataset
 
 
@@ -960,157 +957,7 @@ def input_fn_builder(config, make_dataset_fn=make_dataset):
 
 
 if __name__ == '__main__':
-
-    # NOTE: This is some debugging code that may or may not be helpful for analyzing the data
-
-    import yaml
-
-    with open('configs/base.yaml', 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
-    merged_config = deepcopy(config['data'])
-    merged_config.update(config['model'])
-    config = merged_config
-
-
-    dataset = tf.data.TFRecordDataset(['train00000of32800.tfrecord'])
-    # # For eager debugging
-    # for record in dataset:
-    #     assert False
-        # x = dataset_parser(record, config)
-
-    dataset = dataset.map(lambda x: dataset_parser(x, config))
-    B = 8
-    dataset = dataset.batch(batch_size=B, drop_remainder=True)
-    dataset = dataset.map(handle_batch)
-    start = time.time()
-
-    sizes = []
-    # Debug
-    lens = []
-    w2c = defaultdict(int)
-    span_lens_by_pos = []
-    char2count = defaultdict(int)
-    tok_to_count = np.zeros([encoder.get_vocab_size()], dtype=np.int32)
-    tok_to_count_text = np.zeros([encoder.get_vocab_size()], dtype=np.int32)
-
-    for nei, next_element in enumerate(dataset):
-        print("Done in {:.3f}".format(time.time() - start), flush=True)
-
-        span_lens_by_pos.append((next_element['text_spans'].numpy() != 0).sum(-1))
-
-        for tok_i in next_element['text_spans'].numpy()[:, :36].reshape((-1)):
-            tok_to_count[tok_i] += 1
-        for tok_i in next_element['text_spans'].numpy()[:, 36:].reshape((-1)):
-            tok_to_count_text[tok_i] += 1
-
-        for b in range(B):
-            ts_dec = encoder.decode_batch(next_element['text_spans'][b], skip_special_tokens=False)
-            print("\n\n\n TEXT SPANS\n-----\n")
-            for i, ts_i in enumerate(ts_dec):
-                print("{:02d}) {}".format(i, ts_i.replace('<|PAD|>', '')), flush=True)
-                w2c[ts_i.replace('<|PAD|>', '')] += 1
-                if i < 36:
-                    for c in ts_i.replace('<|PAD|>', ''):
-                        char2count[c] += 1
-
-            print("\n\n\n TEXT TO AUDIO TOKENS\n-----\n")
-            _, len_t2a = _debug_print_tokens(np.stack([next_element['text2audio'][b].numpy(),
-                                                       next_element['text2audio/audio_ptr'][b].numpy(),
-                                                       next_element['text2audio/text_ptr'][b].numpy(),
-                                                       ], -1))
-            print("\n\n\n AUDIO TO TEXT TOKENS\n-----\n")
-            _, len_a2t = _debug_print_tokens(np.stack([next_element['audio2text'][b].numpy(),
-                                                       next_element['audio2text/audio_ptr'][b].numpy(),
-                                                       next_element['audio2text/text_ptr'][b].numpy(),
-                                                       ], -1))
-
-            print("\n\n\n AUDIO-TEXT MATCHING")
-            _, len_atm = _debug_print_tokens(np.stack([next_element['audio_text_matching'][b].numpy(),
-                                                       next_element['audio_text_matching/audio_ptr'][b].numpy(),
-                                                       next_element['audio_text_matching/text_ptr'][b].numpy(),
-                                                       ], -1))
-            print("\n\n\n RANDOM TEXT TOKENS\n-----\n")
-            _, len_rt = _debug_print_tokens(np.stack([next_element['random_text'][b].numpy(),
-                                                      next_element['random_text/audio_ptr'][b].numpy(),
-                                                      next_element['random_text/text_ptr'][b].numpy(),
-                                                      ], -1))
-            lens.append({'t2a': len_t2a[0], 'a2t': len_a2t[0], 'atm': len_atm[0], 'rt': len_rt[0],
-                         'tsdec': len([ts_i for ts_i in ts_dec if len(ts_i.replace('<|PAD|>', '')) > 0])})
-
-    import pandas as pd
-
-    lens = pd.DataFrame(lens)
-    print(lens.mean(0))
-    print("99% len: {}".format(lens.quantile(0.99)))
-    print("95% len: {}".format(lens.quantile(0.95)))
-    print("90% len: {}".format(lens.quantile(0.90)))
-
-    # To get a good value for tsdec (since it's batched)    df['token'] = df['token'].apply(encoder.id_to_token)
-    # Assuming the batch size is 4
-    lens['tsdec'].values.reshape(-1, B).mean(-1).min()
-
-    df = pd.DataFrame(np.stack([next_element['text2audio'][b, 0].numpy(),
-                                next_element['text2audio/audio_ptr'][b, 0].numpy(),
-                                next_element['text2audio/text_ptr'][b, 0].numpy(),
-                                ], -1), columns=['token', 'audio_ptr', 'text_ptr'])
-
-    span_lens_by_pos = np.concatenate(span_lens_by_pos, 0)
-    numer = span_lens_by_pos.sum(0)
-    denom = (span_lens_by_pos > 0).sum(0)
-    span_lens_by_pos_mean = numer / denom
-    print("Text to audio: {:.3f}".format(span_lens_by_pos_mean[:12].mean()))
-    print("Audio to text: {:.3f}".format(span_lens_by_pos_mean[12:24].mean()))
-    print("Random text: {:.3f}".format(span_lens_by_pos_mean[24:].mean()))
-
-
-    def _calc_span_dist(span_lens):
-        lens = np.zeros([15], dtype=np.int32)
-        lens_l = []
-        for x in span_lens.reshape(-1).tolist():
-            if x > 0:
-                lens[x - 1] += 1
-                lens_l.append(x)
-        return lens / (lens.sum() + 1e-5)
-
-
-    print("Text to audio: {}".format(_calc_span_dist(span_lens_by_pos[:, :12])))
-    t2a = _calc_span_dist(span_lens_by_pos[:, :12])
-    a2t = _calc_span_dist(span_lens_by_pos[:, 12:24])
-    rt = _calc_span_dist(span_lens_by_pos[:, 24:])
-
-    print("KL divergence T2A -> A2T: {}".format((t2a * np.log(t2a / a2t)).sum()), flush=True)
-    print(t2a)
-    print("KL divergence T2A -> RT: {}".format((t2a * np.log(t2a / rt)).sum()), flush=True)
-    print(a2t)
-    print("KL divergence A2T -> RT: {}".format((a2t * np.log(a2t / rt)).sum()), flush=True)
-
-    probs = np.maximum(t2a, a2t)
-
-    gamma = 0.5
-    probs_i = probs.copy()
-    for i in range(14):
-        probs_i = np.concatenate([[0.0], probs_i[:-1]/probs_i.sum()], 0)
-        probs += (probs_i * np.power(gamma, i+1))
-    probs = probs / probs.sum()
-
-    print("ev: {}, desired ev {}".format(((np.arange(probs.shape[0]) + 1) * probs).sum(), 5.4 * 5.4 / 5.0))
-
-
-    # get KL on tokens level
-    # tok_to_count_float = tok_to_count.astype(np.float64) + 0.1
-    # tok_to_count_text_float = tok_to_count_text.astype(np.float64) + 0.1
-    #
-    # youtube_dist = tok_to_count_float / tok_to_count_float.sum()
-    # text_dist = tok_to_count_text_float / tok_to_count_text_float.sum()
-    #
-    # count_kl = text_dist * np.log(text_dist / youtube_dist)
-    # bad_tokens = []
-    # funny_g = encoder.id_to_token(32156)[0]
-    # for j, i in enumerate(np.argsort(-count_kl)):
-    #     kl_i = count_kl[i]
-    #     tok_i = encoder.id_to_token(i)
-    #     youtube_count = tok_to_count[i]
-    #     text_count = tok_to_count_text[i]
-    #     print(f"{tok_i:<20s} Token {i:05d}: KL {kl_i:.6f} (YoutubeCT {youtube_count}, TextCT {text_count})", flush=True)
-    #     if (youtube_count == 0) and len(tok_i.replace(funny_g, '')) == 0:
-    #         bad_tokens.append(i)
+    config = {'train_fns': '/home/aobolens/Social_IQ/raw/tfrecords/train{:03d}of128.tfrecord', 'num_train_files': 128, 'use_audio_token_prob': 0.5, 'random_scale_max': 1.1, 'random_scale_min': 1.05, 'fft_hop_length': 588, 'fft_window_size': 1536, 'num_mels': 64, 'sample_rate': 22050, 'spec_size': 188, 'mask_rate': 0.25, 'num_audio2text_seqs': 1, 'num_text2audio_seqs': 1, 'num_text_seqs': 1, 'num_text_seqs_in_record': 1, 'num_segments': 16, 'num_segment_groups': 2, 'num_audio_subsegments': 3, 'seq_len': 640, 'lang_seq_len': 160, 'num_text_spans_to_include': 48, 'text_span_budget': 38, 'hidden_size': 768, 'joint_num_layers': 12, 'use_bfloat16': True, 'audio_num_layers': 12, 'audio_patch_size': 2, 'audio_seq_length': 60, 'audio_token_length': 6, 'output_grid': [12, 20], 'vit_patch_size': 16, 'vit_pooling_ratio': 2, 'vit_num_layers': 12, 'span_num_layers': 4, 'text_span_length': 15}
+    dataset = tf.data.TFRecordDataset([f'/home/aobolens/Social_IQ/raw/tfrecords/train{i:03d}of128.tfrecord' for i in range(128)], num_parallel_reads=1)
+    train_iter = input_fn_builder(config)
+    print(next(train_iter))
