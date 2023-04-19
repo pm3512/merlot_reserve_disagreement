@@ -109,7 +109,7 @@ with open(args.pretrain_config_file, 'r') as f:
     config = yaml.load(f, yaml.FullLoader)
 
 
-config['data']['train_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "train{:03d}of" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
+config['data']['train_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "train{:03d}of0" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
 config['data']['num_train_files'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
 config['data']['num_answers'] = 4
 config['data']['random_scale_max'] = 1.1
@@ -327,7 +327,7 @@ def val_epoch(state: train_state.TrainState):
     :return:
     """
     val_config = deepcopy(config)
-    val_config['data']['val_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "val{:03d}of0" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
+    val_config['data']['val_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "val{:03d}of00" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
     val_config['data']['num_val_files'] = int(os.environ["NUM_VAL_TFRECORDS"])
     val_config['data']['do_random_scale'] = False
     val_config['data']['batch_size'] = args.val_batch_size
@@ -380,7 +380,6 @@ print(f"Info: {pd.Series(val_info)}\n~\n", flush=True)
 if wandb is not None:
     wandb.log({'joint_acc_val': val_info['joint_acc']}, step=0, commit=True)
 '''
-
 # the + 1 is because for some reason it crashes at the end otherwise. why? idk/
 for n in range(config['optimizer']['num_train_steps']+100):
     st = time.time()
@@ -404,7 +403,7 @@ for n in range(config['optimizer']['num_train_steps']+100):
         if (n + 1) % 500 == 0: # do val every 500 steps
             print("Done 500 steps, doing validation", flush=True)
 
-            save_checkpoint(state, path=config['device']['output_dir'], no_optimizer=True)
+            #save_checkpoint(state, path=config['device']['output_dir'], no_optimizer=True)
             val_info = val_epoch(state)
             print(f"Saving @iter {n:03d}.\nInfo: {pd.Series(val_info)}\n~\n", flush=True)
             if wandb is not None:

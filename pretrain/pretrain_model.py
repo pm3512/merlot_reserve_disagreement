@@ -43,7 +43,7 @@ class MerlotReservePretrainer(MerlotReserve):
         :param batch: Everything from pretraining
         :return:
         """
-        result = {}
+        result = {'similarities': {}}
         for vision_mode in ['vision', 'no_vision']:
             num_segment_groups = self.data['num_segment_groups']
             num_audio_subsegments = self.data['num_audio_subsegments']
@@ -72,11 +72,15 @@ class MerlotReservePretrainer(MerlotReserve):
             audio_enc = self.audio_encoder(batch['audio_clips'].reshape(
                 (batch_size * num_segments * num_audio_subsegments, self.audio_seq_length, -1)))
 
+
             # Audio seq is now [batch_size, num_audio_spans, seq_len, H]
             num_audio_spans = num_segments * num_audio_subsegments
             audio_seq = audio_enc['seq_attnpool'].reshape(
                 [batch_size, num_audio_spans, self.audio_token_length, self.config['hidden_size']])
             audio_cls = audio_enc['cls'].reshape([batch_size, num_audio_spans, self.config['hidden_size']])
+
+            if vision_mode == 'vision':
+                audio_seq *= 0.0
 
             # Flatten text sequence
             for k1 in ['text2audio', 'audio2text']:
@@ -259,6 +263,10 @@ class MerlotReservePretrainer(MerlotReserve):
                         outputs[k][k2_extra] = unit_normalize(outputs[k][k2_extra]) * temp_to_use
                         if self.use_bfloat16:
                             outputs[k][k2_extra] = outputs[k][k2_extra].astype(jnp.bfloat16)
+                if vision_mode == 'no_vision':
+                    similarity = ((outputs[k]['x'] * result['vision'][k]['x']).sum(-1) / (temp_to_use ** 2)).mean()
+                    result['similarities'][k] = similarity
+
             result[vision_mode] = outputs
 
         print("Done with forward pass", flush=True)
@@ -320,12 +328,17 @@ def loss_fn_given_preds(preds, should_reweight, t):
 
         loss = sum([v for k, v in loss_info.items() if not k.startswith('_')])
         losses[vision_mode] = (loss, loss_info)
+
+    assert preds['vision'].keys() == preds['no_vision'].keys()
+    losses['similarities'] = preds['similarities']
+    sim_loss = sum([v for k, v in preds['similarities'].items()])
     print("Done with loss_fn_given_preds", flush=True)
     if should_reweight:
         reweighted = reweight(losses['vision'][0], losses['no_vision'][0], t)
         losses['reweighted'] = reweighted
         return reweighted, losses
-    return losses['vision'][0], losses
+    #return (losses['vision'][0] + losses['no_vision'][0]) / 2 + sim_loss, losses
+    return (losses['vision'][0] + losses['no_vision'][0]) / 2, losses
 
 
 def train_step(state: train_state.TrainState, batch, reweight, t, use_bfloat16_grads=True):
@@ -352,6 +365,8 @@ def train_step(state: train_state.TrainState, batch, reweight, t, use_bfloat16_g
     losses, grads = grad_fn(params)
     (loss, loss_info) = losses[1]['vision']
     (loss_nv, loss_info_nv) = losses[1]['no_vision']
+    for c_type, c_loss in losses[1]['similarities'].items():
+        loss_info[f'similarities_{c_type}'] = c_loss
     if reweight:
         loss_reweighted = losses[1]['reweighted']
 

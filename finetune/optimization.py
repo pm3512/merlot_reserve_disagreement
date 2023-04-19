@@ -8,6 +8,7 @@ from flax import jax_utils
 from jax._src.api import device_put_sharded
 import optax
 from typing import Callable, Dict, Tuple
+from flax.core.frozen_dict import unfreeze, freeze
 sys.path.append('../')
 from pretrain.optimization import *
 
@@ -178,6 +179,9 @@ def finetune_train_step(state: train_state.TrainState, batch,
         new_opt_state.append(nos)
 
     new_params = optax.apply_updates(state.params, updates)
+    new_params, proj_params = new_params.pop('proj')
+    unfrozen = unfreeze(state.params)
+    unfrozen['proj'] = proj_params
 
     # Average metrics over all replicas
     loss_info = jax.lax.pmean(loss_info, axis_name='batch')
@@ -185,7 +189,7 @@ def finetune_train_step(state: train_state.TrainState, batch,
 
     new_state = state.replace(
         step=state.step + 1,
-        params=new_params,
+        params=freeze(unfrozen),
         opt_state=tuple(new_opt_state),
     )
     return new_state, loss_info

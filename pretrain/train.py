@@ -22,6 +22,9 @@ import functools
 import time
 import wandb
 
+# DEBUG
+#jax.config.update('jax_disable_jit', True)
+
 
 
 jax.config.update('jax_log_compiles', True)
@@ -125,7 +128,7 @@ start_step = int(state.step)
 state = jax_utils.replicate(state)
 
 p_train_step = jax.pmap(functools.partial(train_step, use_bfloat16_grads=config['model']['use_bfloat16'],
-                                          reweight=config['model']['reweight'], t=config['model']['threshold']),
+                                        reweight=config['model']['reweight'], t=config['model']['threshold']),
                         axis_name='batch', donate_argnums=(0, 1,))
 
 train_metrics = []
