@@ -1,4 +1,5 @@
 from datetime import datetime, date
+import pickle
 import re
 import sys
 import os
@@ -55,7 +56,7 @@ parser.add_argument(
 parser.add_argument(
     '-ids_fn',
     dest='ids_fn',
-    default=os.path.join(os.environ['DATA_DIR'], 'folds_train_nonempty.csv'),
+    default=os.path.join(os.environ['DATA_DIR'], 'train_dev.csv'),
     type=str,
     help='We will use these IDs. you probably should filter them to mkae sure they all at least have the right files. can start with gs://'
 )
@@ -144,6 +145,26 @@ encoder = get_encoder()
 NUM_CHUNKS = args.num_chunks
 NUM_MELS = 64
 
+def load_pickle(pickle_file):
+    try:
+        with open(pickle_file, 'rb') as f:
+            pickle_data = pickle.load(f)
+    except UnicodeDecodeError as e:
+        with open(pickle_file, 'rb') as f:
+            pickle_data = pickle.load(f, encoding='latin1')
+    except Exception as e:
+        print('Unable to load data ', pickle_file, ':', e)
+        raise
+    return pickle_data
+
+
+MEGA_WINDOW_SIZE = 5.0
+
+language_sdk = load_pickle(os.environ['LANGUAGE_PATH'])
+print('len before', len(language_sdk))
+language_sdk = {k: v for k, v in language_sdk.items() if v['punchline_intervals'][-1][-1] > MEGA_WINDOW_SIZE + 1 }
+print('len after', len(language_sdk))
+
 ###########################################
 # MEGA_WINDOW_SIZE = 10.0
 # # Let's say we want a 10 second mega-window and 7 chunks. The extra 1.25sec can be missing for
@@ -159,7 +180,6 @@ NUM_MELS = 64
 # OK_TOKS_MULTIWINDOW = 30  # If N windows would have this many tokens, then break (yielding a short window)
 ############################################
 
-MEGA_WINDOW_SIZE = 5.0
 # Let's say we want a 5 second mega-window and 3 chunks. Take out some 0.2sec as padding
 
 # Need 1 + (22050 * t_delta) / num_hops = 60
@@ -221,6 +241,7 @@ def load_video(video_id):
     def _count_vowels(word):
         return len(re.findall('a|e|i|o|u', word.lower()))
 
+    '''
     sub_fn = os.path.join(os.environ["TRANSCRIPT_PATH"], video_id + '-trimmed.en.vtt')
     subs = pysrt.open(sub_fn)
     data = {"word": [], "start": [], "end": []}
@@ -248,8 +269,21 @@ def load_video(video_id):
             data['start'].append(start_s)
             data['end'].append(end_s)
             start_s = end_s
+    '''
+
+    data = {"word": [], "start": [], "end": []}
+    language_data = language_sdk[int(video_id)]
+    text = ' '.join(language_data['context_sentences']) + ' ' + language_data['punchline_sentence']
+    timestamps = np.concatenate(language_data['context_intervals'])
+    timestamps = np.concatenate((timestamps, language_data['punchline_intervals'])).tolist()
+
+    for word, ts in zip(text.split(), timestamps):
+        data['word'].append(word)
+        data['start'].append(ts[0])
+        data['end'].append(ts[1])
 
     item['transcripts'] = data
+    item['duration'] = data['end'][-1]
 
     # vtt = pd.DataFrame(item['transcripts']['en'])
     vtt = pd.DataFrame(item['transcripts'])
@@ -274,7 +308,8 @@ def load_video(video_id):
     #     raise ValueError("{} has a length variance of {:.3f}".format(item['id'], len_variance))
     item['transcript_vtt'] = vtt
 
-    video_fn = os.path.join(os.environ['VIDEO_PATH'], video_id + '_trimmed-out.mp4') #os.path.join(STORAGE_DIR, 'video.mp4')
+    video_fn = os.path.join(os.environ['VIDEO_PATH'], video_id + '.mp4') #os.path.join(STORAGE_DIR, 'video.mp4')
+    # video_fn = os.path.join(os.environ['VIDEO_PATH'], video_id + '_trimmed-out.mp4') #os.path.join(STORAGE_DIR, 'video.mp4')
     # vblob = bucket.blob(f'youtube_dump/{video_id}/{video_id}.mp4')
     # if not vblob.exists():
     #     return None
@@ -307,9 +342,11 @@ def video_iterator():
         time.sleep(5.0)  # race condition? idk
         raise ValueError("Couldnt load video ids")
     for video_id in channels_video_ids:
-        video = load_video(video_id)
-        if video is not None:
-            yield video
+        if int(video_id) in language_sdk:
+            print("LOADING VIDEO {}, {}".format(video_id, args.fold), flush=True)
+            video = load_video(video_id)
+            if video is not None:
+                yield video
 
 def get_librosa_params(sr, playback_speed):
     params = {
@@ -418,8 +455,8 @@ def video_chunk_iterator():
             continue
 
         # Load audio in background
-        audio_fn = os.path.join(os.environ['WAV_PATH'], item['title'] + '_trimmed-out.wav') # os.path.join(STORAGE_DIR, 'audio.wav')
-        video_fn = os.path.join(os.environ['VIDEO_PATH'], item['title'] + '_trimmed-out.mp4') # os.path.join(STORAGE_DIR, 'video.mp4')
+        audio_fn = os.path.join(os.environ['WAV_PATH'], item['title'] + '.wav') # os.path.join(STORAGE_DIR, 'audio.wav')
+        video_fn = os.path.join(os.environ['VIDEO_PATH'], item['title'] + '.mp4') # os.path.join(STORAGE_DIR, 'video.mp4')
         ffmpeg_process = subprocess.Popen(['ffmpeg', '-y', '-i', video_fn, '-ac', '1', '-ar', '22050',
                                            audio_fn,
                                            ],
@@ -762,7 +799,7 @@ with GCSTFRecordWriter(train_file, buffer_size=10000, auto_close=False) as train
                 feats[f'c{i:02d}/{k}'] = v
 
         example = tf.train.Example(features=tf.train.Features(feature=feats))
-        train_writer.write(example.SerializeToString())
+        #train_writer.write(example.SerializeToString())
         num_written += 1
         if num_written % 10 == 0:
             te = time.time() - st

@@ -1,5 +1,5 @@
 import tensorflow as tf 
-raw_dataset = tf.data.TFRecordDataset("/home/aobolens/Social_IQ/raw/tfrecords/train000of128.tfrecord")
+raw_dataset = tf.data.TFRecordDataset("/home/aobolens/urfunny/finetune/train000of128.tfrecord")
 
 for raw_record in raw_dataset.take(1):
     example = tf.train.Example()

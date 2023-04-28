@@ -179,9 +179,11 @@ def finetune_train_step(state: train_state.TrainState, batch,
         new_opt_state.append(nos)
 
     new_params = optax.apply_updates(state.params, updates)
+    '''
     new_params, proj_params = new_params.pop('proj')
     unfrozen = unfreeze(state.params)
     unfrozen['proj'] = proj_params
+    '''
 
     # Average metrics over all replicas
     loss_info = jax.lax.pmean(loss_info, axis_name='batch')
@@ -189,7 +191,8 @@ def finetune_train_step(state: train_state.TrainState, batch,
 
     new_state = state.replace(
         step=state.step + 1,
-        params=freeze(unfrozen),
+        #params=freeze(unfrozen),
+        params=new_params,
         opt_state=tuple(new_opt_state),
     )
     return new_state, loss_info

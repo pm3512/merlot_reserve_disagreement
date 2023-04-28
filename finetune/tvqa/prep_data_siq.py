@@ -196,15 +196,6 @@ def read_bbox(filename):
     return im_face_dict
 
 def parse_item(item):
-    answer_num = 0
-    answer_choices = []
-    while f"a{answer_num}" in item:
-        answer_choices.append(item.pop(f"a{answer_num}"))
-        answer_num += 1
-    qa_item = {'qa_query': item.pop('q'), 'qa_choices': answer_choices,
-               'qa_label': item.get('answer_idx', 0),
-               'id': '{}~{}'.format(item.pop('qid'), item['vid_name'])}
-
     frames_path = os.path.join(args.data_dir, 'frames',
                             item['vid_name'] + "_trimmed-out")
     name = item['vid_name']

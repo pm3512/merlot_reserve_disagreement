@@ -56,10 +56,28 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    '--threshold',
-    help='If delta loss is below this threshold, datapoint is ignored',
+    '--video_threshold',
+    help='Threshold for video loss',
     type=float,
-    default=0.,
+    default=0,
+)
+
+parser.add_argument(
+    '--sim_threshold',
+    help='Threshold for similarity loss',
+    type=float,
+    default=0,
+)
+
+parser.add_argument(
+    '--audio_threshold',
+    help='Threshold for audio loss',
+    type=float,
+    default=0,
+)
+parser.add_argument(
+    '--run_name',
+    type=str
 )
 
 parser.add_argument(
@@ -73,9 +91,6 @@ print(f"Loading from {args.config_file}", flush=True)
 with open(args.config_file, 'r') as f:
     config = yaml.load(f, yaml.FullLoader)
 
-    seattle_time = pytz.utc.localize(datetime.utcnow()).astimezone(pytz.timezone('America/Los_Angeles'))
-    seattle_time = seattle_time.strftime("%Y-%m-%d-%H:%M.%S")
-
     if is_on_gpu:
         config['data']['num_train_files'] = 1
         config['device']['output_dir'] = 'temp'
@@ -84,15 +99,18 @@ with open(args.config_file, 'r') as f:
 
         config['optimizer']['num_train_steps_override'] = 1000
     elif args.output_dir == '':
-        config['device']['output_dir'] = os.path.join(config['device']['output_dir'], seattle_time)
+        config['device']['output_dir'] = os.path.join(config['device']['output_dir'], args.run_name)
     else:
-        config['device']['output_subdir'] = os.path.join(config['device']['output_dir'], seattle_time)
+        config['device']['output_subdir'] = os.path.join(config['device']['output_dir'], args.run_name)
         config['device']['output_dir'] = args.output_dir
     config['model']['reweight'] = args.reweight
-    config['model']['threshold'] = args.threshold
+    config['model']['sim_threshold'] = args.sim_threshold
+    config['model']['audio_threshold'] = args.audio_threshold
+    config['model']['video_threshold'] = args.video_threshold
 
 config['_path'] = args.config_file
-wandb.init(config=config, project=args.wandb_name, tags=['pretrain'])
+wandb.init(config=config, project=args.wandb_name, tags=['pretrain'], name=args.run_name)
+wandb.run.log_code('.')
 '''
 if (jax.process_index() == 0) and (not is_on_gpu) and (not args.disable_wandb):
     #import wandb
@@ -122,15 +140,19 @@ params = model.init_from_dummy_batch(dummy_batch)
 state = construct_train_state(opt_config=config['optimizer'], model=model, params=params)
 
 # load if we can
-state = load_checkpoint(state=state, path=config['device']['output_dir'], step=None,
+state = load_checkpoint(state=state, path=os.path.join(config['device']['output_dir'], 'ckpt_zzzzzzzzzz'), step=None,
                         use_bfloat16_weights=config['optimizer'].get('use_bfloat16_weights', False))
 start_step = int(state.step)
 state = jax_utils.replicate(state)
 
 p_train_step = jax.pmap(functools.partial(train_step, use_bfloat16_grads=config['model']['use_bfloat16'],
-                                        reweight=config['model']['reweight'], t=config['model']['threshold']),
+                                        reweight=config['model']['reweight'], thresholds={k: config['model'][k] for k in ['sim_threshold', 'audio_threshold', 'video_threshold']}),
                         axis_name='batch', donate_argnums=(0, 1,))
 
+'''
+for batch in ds_train_iter:
+    pass
+'''
 train_metrics = []
 time_elapsed = []
 num_train_steps = config['optimizer'].get('num_train_steps_override', config['optimizer']['num_train_steps'])

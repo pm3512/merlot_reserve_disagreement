@@ -79,8 +79,7 @@ class MerlotReservePretrainer(MerlotReserve):
                 [batch_size, num_audio_spans, self.audio_token_length, self.config['hidden_size']])
             audio_cls = audio_enc['cls'].reshape([batch_size, num_audio_spans, self.config['hidden_size']])
 
-            if vision_mode == 'vision':
-                audio_seq *= 0.0
+            audio_seq_replaced = audio_seq * 0.0 if vision_mode == 'vision' else audio_seq
 
             # Flatten text sequence
             for k1 in ['text2audio', 'audio2text']:
@@ -111,7 +110,7 @@ class MerlotReservePretrainer(MerlotReserve):
                 token_embs=txt_embs['audio2text'],
                 vision_input=jnp.tile(imgs_seq, [1, num_audio2text_seqs, 1, 1]).reshape(-1, vis_seq_length,
                                                                                         self.hidden_size),
-                audio_spans=audio_seq.repeat(num_segment_groups * num_audio2text_seqs, axis=0),
+                audio_spans=audio_seq_replaced.repeat(num_segment_groups * num_audio2text_seqs, axis=0),
                 audio_pointers=batch['audio2text/audio_ptr'],
                 padding_len=seq_len,
                 video_src_idx=self._augment_video_src_idx(jnp.tile(batch['video_src_index'].reshape(
@@ -274,16 +273,16 @@ class MerlotReservePretrainer(MerlotReserve):
         return result
 
 
-def reweight(loss, loss_nv, t):
-    # mean is 5.71
-    # std is 1.51
-    # divide by approximately 4.8 to maintain integral
-    loss_nograd = jax.lax.stop_gradient(loss)
-    loss_nv_nograd = jax.lax.stop_gradient(loss_nv)
-    reweight_loss = jax.numpy.maximum(0, loss_nv_nograd - loss_nograd - t) / 4.8 * loss
+def reweight(loss, loss_nv, sim_loss, thresholds):
+    #loss_nograd = jax.lax.stop_gradient(loss)
+    #loss_nv_nograd = jax.lax.stop_gradient(loss_nv)
+    loss_t = jax.lax.cond(loss > thresholds['video_threshold'], lambda _: loss, lambda _: jnp.zeros_like(loss), operand=None)
+    loss_nv_t = jax.lax.cond(loss_nv > thresholds['audio_threshold'], lambda _: loss_nv, lambda _: jnp.zeros_like(loss_nv), operand=None)
+    loss_sim_t = jax.lax.cond(sim_loss > thresholds['sim_threshold'], lambda _:sim_loss, lambda _: jnp.zeros_like(sim_loss), operand=None)
+    reweight_loss = loss_t + loss_nv_t + loss_sim_t
     return reweight_loss
 
-def loss_fn_given_preds(preds, should_reweight, t):
+def loss_fn_given_preds(preds, should_reweight, thresholds):
     print('running loss_fn_given_preds', flush=True)
     losses = {}
     for vision_mode in ['vision', 'no_vision']:
@@ -334,14 +333,15 @@ def loss_fn_given_preds(preds, should_reweight, t):
     sim_loss = sum([v for k, v in preds['similarities'].items()])
     print("Done with loss_fn_given_preds", flush=True)
     if should_reweight:
-        reweighted = reweight(losses['vision'][0], losses['no_vision'][0], t)
+        reweighted = reweight(losses['vision'][0], losses['no_vision'][0], sim_loss, thresholds)
         losses['reweighted'] = reweighted
         return reweighted, losses
+    return (losses['vision'][0] ), losses
     #return (losses['vision'][0] + losses['no_vision'][0]) / 2 + sim_loss, losses
-    return (losses['vision'][0] + losses['no_vision'][0]) / 2, losses
+    #return (losses['vision'][0] + losses['no_vision'][0]) / 2, losses
 
 
-def train_step(state: train_state.TrainState, batch, reweight, t, use_bfloat16_grads=True):
+def train_step(state: train_state.TrainState, batch, reweight, thresholds, use_bfloat16_grads=True):
     """
     Note: we'll compile this with pmap so no need to jit
     :param state:
@@ -354,7 +354,7 @@ def train_step(state: train_state.TrainState, batch, reweight, t, use_bfloat16_g
 
     def _loss_fn(params):
         print('running loss fn', flush=True)
-        return loss_fn_given_preds(state.apply_fn({'params': params}, batch), reweight, t)
+        return loss_fn_given_preds(state.apply_fn({'params': params}, batch), reweight, thresholds)
 
     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
 

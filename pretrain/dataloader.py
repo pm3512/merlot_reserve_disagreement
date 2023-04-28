@@ -957,7 +957,24 @@ def input_fn_builder(config, make_dataset_fn=make_dataset):
 
 
 if __name__ == '__main__':
-    config = {'train_fns': '/home/aobolens/Social_IQ/raw/tfrecords/train{:03d}of128.tfrecord', 'num_train_files': 128, 'use_audio_token_prob': 0.5, 'random_scale_max': 1.1, 'random_scale_min': 1.05, 'fft_hop_length': 588, 'fft_window_size': 1536, 'num_mels': 64, 'sample_rate': 22050, 'spec_size': 188, 'mask_rate': 0.25, 'num_audio2text_seqs': 1, 'num_text2audio_seqs': 1, 'num_text_seqs': 1, 'num_text_seqs_in_record': 1, 'num_segments': 16, 'num_segment_groups': 2, 'num_audio_subsegments': 3, 'seq_len': 640, 'lang_seq_len': 160, 'num_text_spans_to_include': 48, 'text_span_budget': 38, 'hidden_size': 768, 'joint_num_layers': 12, 'use_bfloat16': True, 'audio_num_layers': 12, 'audio_patch_size': 2, 'audio_seq_length': 60, 'audio_token_length': 6, 'output_grid': [12, 20], 'vit_patch_size': 16, 'vit_pooling_ratio': 2, 'vit_num_layers': 12, 'span_num_layers': 4, 'text_span_length': 15}
-    dataset = tf.data.TFRecordDataset([f'/home/aobolens/Social_IQ/raw/tfrecords/train{i:03d}of128.tfrecord' for i in range(128)], num_parallel_reads=1)
-    train_iter = input_fn_builder(config)
-    print(next(train_iter))
+    config = {'train_fns': '/home/aobolens/urfunny/tfrecords/train{:03d}of064.tfrecord', 'num_train_files': 64, 'use_audio_token_prob': 0.5, 'random_scale_max': 1.1, 'random_scale_min': 1.05, 'fft_hop_length': 588, 'fft_window_size': 1536, 'num_mels': 64, 'sample_rate': 22050, 'spec_size': 188, 'mask_rate': 0.25, 'num_audio2text_seqs': 1, 'num_text2audio_seqs': 1, 'num_text_seqs': 1, 'num_text_seqs_in_record': 1, 'num_segments': 16, 'num_segment_groups': 2, 'num_audio_subsegments': 3, 'seq_len': 640, 'lang_seq_len': 160, 'num_text_spans_to_include': 48, 'text_span_budget': 38, 'hidden_size': 768, 'joint_num_layers': 12, 'use_bfloat16': True, 'audio_num_layers': 12, 'audio_patch_size': 2, 'audio_seq_length': 60, 'audio_token_length': 6, 'output_grid': [12, 20], 'vit_patch_size': 16, 'vit_pooling_ratio': 2, 'vit_num_layers': 12, 'span_num_layers': 4, 'text_span_length': 15}
+    dataset = tf.data.TFRecordDataset(['/home/aobolens/urfunny/tfrecords/train000of128.tfrecord'], num_parallel_reads=1)
+    num_segments = config['num_segments']
+
+    for x in dataset:
+        keys_to_features = {f'c{i:02d}/{k}': v for i in range(num_segments) for k, v in segment_k2f.items()}
+        parsed_features = tf.io.parse_single_example(x, keys_to_features)
+        features = {}
+
+        def _unsparsify(x):
+            if isinstance(x, tf.SparseTensor):
+                x = x.values
+            if x.dtype == tf.int64:
+                x = tf.cast(x, dtype=tf.int32)
+            return x
+
+        segment_list = [{k: _unsparsify(parsed_features.pop(f'c{i:02d}/{k}')) for k in segment_k2f} for i in
+                        range(num_segments)]
+        for seg in segment_list:
+            print(encoder.decode(seg['tok_ids']))
+        pass

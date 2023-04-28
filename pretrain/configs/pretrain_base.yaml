@@ -4,7 +4,7 @@
 # bsize of 1024 so 75596 is one epoch
 
 data:
-  train_fns: "/home/aobolens/Social_IQ/raw/tfrecords/train{:03d}of128.tfrecord"
+  train_fns: "/home/aobolens/urfunny/tfrecords/train{:03d}of128.tfrecord"
   num_train_files: 128
 
   use_audio_token_prob: 0.5
@@ -79,7 +79,7 @@ device:
   wandb_project: merlotreserve
 
 optimizer:
-  learning_rate: 0.0004
+  learning_rate: 0.0001
   num_train_steps: 960 # 20 epochs
   num_warmup_steps: 0 # first 1/20th epoch
   weight_decay_rate: 0.1

@@ -102,16 +102,23 @@ parser.add_argument(
     action='store_true',
     default=True,
 )
+parser.add_argument(
+    '--run_name',
+    type=str
+)
 args = parser.parse_args()
+
+# DEBUG
+jax.config.update('jax_disable_jit', True)
 
 # print(f"Loading from {args.config_file}", flush=True)
 with open(args.pretrain_config_file, 'r') as f:
     config = yaml.load(f, yaml.FullLoader)
 
 
-config['data']['train_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "train{:03d}of0" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
+config['data']['train_fns'] = os.path.join(os.environ["FINETUNE_TFRECORDS_PATH"], "train{:03d}of0" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
 config['data']['num_train_files'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
-config['data']['num_answers'] = 4
+#config['data']['num_answers'] = 4
 config['data']['random_scale_max'] = 1.1
 config['data']['random_scale_min'] = 1.0
 config['data']['num_segments'] = 7
@@ -121,7 +128,8 @@ config['device']['prefetch_size'] = 0
 config['device']['n_fns_per_cycle'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
 
 NUM_EPOCH = args.ne
-TRAIN_SIZE = 17494
+#TRAIN_SIZE = 17494
+TRAIN_SIZE = 7614
 steps_per_epoch = TRAIN_SIZE // config['device']['batch_size']
 config['optimizer'] = {
     'beta_2': 0.98,
@@ -152,12 +160,12 @@ ds_train_iter = finetune_input_fn_builder(config, 'tvqa')
 
 
 config['_ckpt'] = args.ckpt
-tags = [cfg_name]
+tags = [cfg_name, 'urfunny']
 if args.output_name != '':
     tags.append(args.output_name)
 # if (jax.process_index() == 0):
 #     import wandb
-wandb.init(config=config, project=args.wandb_name, notes="Loaded from "+cfg_name, tags=tags)
+wandb.init(config=config, project=args.wandb_name, notes="Loaded from "+cfg_name, tags=tags, name=args.run_name)
 # else:
 # wandb = None
 
@@ -259,8 +267,8 @@ class MerlotReserveTVQA(MerlotReserve):
         joint_enc = jnp.squeeze(self.proj(pooled_h), -1)
 
         logits_from_audio, logits_from_text = jnp.split(joint_enc, 2, axis=0)
-        logits_from_audio = logits_from_audio.reshape(batch_size, num_ans_per)
-        logits_from_text = logits_from_text.reshape(batch_size, num_ans_per)
+        logits_from_audio = logits_from_audio.reshape(batch_size)
+        logits_from_text = logits_from_text.reshape(batch_size)
 
         return logits_from_audio, logits_from_text
 
@@ -283,6 +291,23 @@ state, tx_fns = construct_finetuning_train_state(opt_config=config['optimizer'],
 
 def train_loss_fn(state, params, batch):
     logits_from_audio, logits_from_text = state.apply_fn({'params': params}, batch)
+    lprobs_from_audio = jax.nn.sigmoid(logits_from_audio)
+    lprobs_from_text = jax.nn.sigmoid(logits_from_text)
+
+    labels = batch['labels']
+    audio_cross_entropy = -jnp.mean(labels * jnp.log(lprobs_from_audio) + (1 - labels) * jnp.log(1 - lprobs_from_audio), axis=-1)
+    text_cross_entropy = -jnp.mean(labels * jnp.log(lprobs_from_text) + (1 - labels) * jnp.log(1 - lprobs_from_text), axis=-1)
+    loss = audio_cross_entropy + text_cross_entropy
+    pred_audio = (lprobs_from_audio > 0.5).astype(jnp.int32) 
+    is_right_audio = (pred_audio == labels).astype(jnp.float32).mean()
+    preds_text = (lprobs_from_text > 0.5).astype(jnp.int32)
+    is_right_text = (preds_text == labels).astype(jnp.float32).mean()
+
+    return loss, {'train_audio_acc': is_right_audio, 'train_text_acc': is_right_text,
+                  'train_audio_loss': audio_cross_entropy, 'train_text_loss': text_cross_entropy}
+
+    
+    '''
     lprobs_from_audio = jax.nn.log_softmax(logits_from_audio, axis=-1)
     lprobs_from_text = jax.nn.log_softmax(logits_from_text, axis=-1)
 
@@ -299,6 +324,8 @@ def train_loss_fn(state, params, batch):
 
     return loss, {'train_audio_acc': is_right_audio, 'train_text_acc': is_right_text,
                   'train_audio_loss': loss_audio, 'train_text_loss': loss_text,}
+    '''
+
 
 
 p_train_step = jax.pmap(functools.partial(finetune_train_step, loss_fn=train_loss_fn, tx_fns=tx_fns, scan_minibatch=args.scan_minibatch),
@@ -307,6 +334,13 @@ p_train_step = jax.pmap(functools.partial(finetune_train_step, loss_fn=train_los
 def pred_step(state: train_state.TrainState, batch):
     logits_from_audio, logits_from_text = state.apply_fn({'params': state.params}, batch)
 
+    out = {'logprobs_audio': jax.nn.sigmoid(logits_from_audio),
+            'preds_audio': logits_from_audio > 0.5,
+            'logprobs_text': jax.nn.sigmoid(logits_from_text),
+            'preds_text': logits_from_text > 0.5,
+            'preds_joint': (jax.nn.sigmoid(logits_from_audio) + jax.nn.sigmoid(logits_from_text)) > 0.5,
+            }
+    '''
     out = {'logprobs_audio': jax.nn.log_softmax(logits_from_audio, axis=-1),
             'preds_audio': jnp.argmax(logits_from_audio, -1),
             'logprobs_text': jax.nn.log_softmax(logits_from_text, axis=-1),
@@ -314,20 +348,21 @@ def pred_step(state: train_state.TrainState, batch):
             }
     softmax_joint = jax.nn.softmax(logits_from_audio, axis=-1) + jax.nn.softmax(logits_from_text, axis=-1)
     out['preds_joint'] = jnp.argmax(softmax_joint, -1)
+    '''
     return out
 
 
 p_pred_step = jax.pmap(pred_step, axis_name='batch', donate_argnums=(1,))
 
 
-def val_epoch(state: train_state.TrainState):
+def val_epoch(state: train_state.TrainState, prefix='val'):
     """
     perform a validation epoch
     :param state:
     :return:
     """
     val_config = deepcopy(config)
-    val_config['data']['val_fns'] = os.path.join(os.environ["SIQ_TFRECORDS_PATH"], "val{:03d}of00" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
+    val_config['data']['val_fns'] = os.path.join(os.environ["FINETUNE_TFRECORDS_PATH"], prefix + "{:03d}of00" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
     val_config['data']['num_val_files'] = int(os.environ["NUM_VAL_TFRECORDS"])
     val_config['data']['do_random_scale'] = False
     val_config['data']['batch_size'] = args.val_batch_size
@@ -381,6 +416,10 @@ if wandb is not None:
     wandb.log({'joint_acc_val': val_info['joint_acc']}, step=0, commit=True)
 '''
 # the + 1 is because for some reason it crashes at the end otherwise. why? idk/
+'''
+for batch in ds_train_iter:
+    pass
+'''
 for n in range(config['optimizer']['num_train_steps']+100):
     st = time.time()
     id_, batch = next(ds_train_iter)
@@ -399,11 +438,9 @@ for n in range(config['optimizer']['num_train_steps']+100):
             if wandb is not None:
                 wandb.log(train_metrics[step_for_logging], step=step_for_logging, commit=True) #(n + 1) % log_every == 0)
 
-        # if (n + 1) % config['device']['iterations_per_loop'] == 0:
         if (n + 1) % 500 == 0: # do val every 500 steps
             print("Done 500 steps, doing validation", flush=True)
 
-            #save_checkpoint(state, path=config['device']['output_dir'], no_optimizer=True)
             val_info = val_epoch(state)
             print(f"Saving @iter {n:03d}.\nInfo: {pd.Series(val_info)}\n~\n", flush=True)
             if wandb is not None:
@@ -414,3 +451,9 @@ for n in range(config['optimizer']['num_train_steps']+100):
             tsum = sum(time_elapsed)
             print("Completed 100 batches in {:.3f}sec, avg {:.3f} it/sec".format(tsum, 100.0 / tsum), flush=True)
             time_elapsed = []
+print('saving')
+#save_checkpoint(state, path=config['device']['output_dir'], no_optimizer=True)
+test_info = val_epoch(state, prefix='test')
+print(f"Test info: {pd.Series(test_info)}\n~\n", flush=True)
+test_info = {k + '_test': v for k, v in test_info.items()}
+wandb.log(test_info, commit=True)

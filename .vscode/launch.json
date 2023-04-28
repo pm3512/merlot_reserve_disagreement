@@ -22,7 +22,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "-ckpt", "/home/aobolens/ckpt/ckpt_noweight"
+                "-ckpt", "/home/aobolens/ckpt/sim_0_lr/ckpt_760560"
             ]
         },
         {
@@ -34,7 +34,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "-fold", "0"
+                "-fold", "92"
             ]
         },
         {
@@ -46,19 +46,19 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "configs/pretrain_base.yaml"
+                "configs/pretrain_base.yaml", "--run_name", "pretrain_urfunny"
             ]
         },
         {
-            "name": "prep_data_siq.py",
+            "name": "prep_data_urfunny.py",
             "type": "python",
             "request": "launch",
             "cwd": "${workspaceFolder}/finetune/tvqa",
-            "program": "prep_data_siq.py",
+            "program": "prep_data_urfunny.py",
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "-fold", "0", "-num_folds", "128"
+                "-fold", "0", "-num_folds", "8", "-split", "val"
             ]
         }
     ]

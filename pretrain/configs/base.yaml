@@ -69,7 +69,7 @@ model:
 device:
   use_tpu: True
   num_tpu_cores: 512
-  output_dir: "/home/aobolens/ckpt/ckpt_t2"
+  output_dir: "/home/aobolens/ckpt/baseline_finetuned"
   batch_size: 1024
   iterations_per_loop: 7500
   commit_every_nsteps: 50

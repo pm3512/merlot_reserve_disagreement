@@ -147,12 +147,11 @@ def preprocess_tvqa(record, config):
     k2f = {
         'id': tf.io.FixedLenFeature((), tf.string, default_value=''),
         'magic_number': tf.io.FixedLenFeature((), tf.float32, 1),
-        'qa_query': tf.io.VarLenFeature(tf.int64),
-        'qa_label': tf.io.FixedLenFeature((), tf.int64, 1),
+        #'qa_query': tf.io.VarLenFeature(tf.int64),
+        #'qa_label': tf.io.FixedLenFeature((), tf.int64, 1),
         'num_frames': tf.io.FixedLenFeature((), tf.int64, 1),
+        'label': tf.io.FixedLenFeature((), tf.int64),
     }
-    for i in range(config['num_answers']):
-        k2f[f'qa_choice_{i}'] = tf.io.VarLenFeature(tf.int64)
 
     for i in range(config['num_segments']):
         k2f[f'c{i:02d}/image_encoded'] = tf.io.FixedLenFeature((), tf.string, default_value='')
@@ -171,6 +170,11 @@ def preprocess_tvqa(record, config):
     features = {k: _unsparsify(v) for k, v in features.items()}
 
 
+    '''
+    for seg in segment_list:
+        words = encoder.decode(seg['sub'])
+        print(words)
+    '''
     encodeds = tf.stack([x['image_encoded'] for x in segment_list])
     features['images'] = tf.map_fn(functools.partial(load_and_resize_img, config=config),
                                    elems=encodeds, fn_output_signature=tf.float32, name='decode_img')
@@ -181,35 +185,31 @@ def preprocess_tvqa(record, config):
     features['audio_clips'] = tf.cast(features['audio_clips'], dtype=tf.float32) / features['magic_number']
 
     #############
-    query = tf.concat([features.pop('qa_query'), encoder.encode('answer: ').ids], 0)
+    #query = tf.concat([features.pop('qa_query'), encoder.encode('answer: ').ids], 0)
 
     textonly_seqs = []
     audio_seqs = []
 
-    for i in range(config['num_answers']):
-        option_i = tf.concat([query, features.pop(f'qa_choice_{i}')], 0)
-        option_i = tf.concat([option_i[:(config['lang_seq_len'] - 1)], [MASK]], 0)
+    # Now we add the subtitles
+    sub_input_ragged = tf.ragged.stack([x['sub'] for x in segment_list])
+    segment_id = tf.cast(tf.where(sub_input_ragged)[:, 0], dtype=tf.int32)
+    textonly_seq_i = tf.stack([sub_input_ragged.values, segment_id], -1)
+    textonly_seq_i = pad_to_fixed_size(textonly_seq_i, 0,
+                                        output_shape=[config['lang_seq_len'], 2], truncate=True)
+    textonly_seqs.append(textonly_seq_i)
 
-        # Now we add the subtitles
-        sub_input_ragged = tf.ragged.stack([option_i] + [x['sub'] for x in segment_list])
-        segment_id = tf.cast(tf.where(sub_input_ragged)[:, 0], dtype=tf.int32)
-        textonly_seq_i = tf.stack([sub_input_ragged.values, segment_id], -1)
-        textonly_seq_i = pad_to_fixed_size(textonly_seq_i, 0,
-                                           output_shape=[config['lang_seq_len'], 2], truncate=True)
-        textonly_seqs.append(textonly_seq_i)
-
-        # Now we add the non-subtitles
-        audio_span_full = tf.fill([3 * config['audio_token_length']], AUDIOSPAN)
-        audio_input_ragged = tf.ragged.stack([option_i] + [audio_span_full for _ in segment_list])
-        segment_id = tf.cast(tf.where(audio_input_ragged)[:, 0], dtype=tf.int32)
-        audio_seq_i = tf.stack([audio_input_ragged.values, segment_id], -1)
-        audio_seq_i = pad_to_fixed_size(audio_seq_i, 0,
-                                                   output_shape=[config['lang_seq_len'], 2], truncate=True)
-        audio_seqs.append(audio_seq_i)
+    # Now we add the non-subtitles
+    audio_span_full = tf.fill([3 * config['audio_token_length']], AUDIOSPAN)
+    audio_input_ragged = tf.ragged.stack([audio_span_full for _ in segment_list])
+    segment_id = tf.cast(tf.where(audio_input_ragged)[:, 0], dtype=tf.int32)
+    audio_seq_i = tf.stack([audio_input_ragged.values, segment_id], -1)
+    audio_seq_i = pad_to_fixed_size(audio_seq_i, 0,
+                                                output_shape=[config['lang_seq_len'], 2], truncate=True)
+    audio_seqs.append(audio_seq_i)
 
     features['textonly_seqs'] = tf.stack(textonly_seqs)
     features['audio_seqs'] = tf.stack(audio_seqs)
-    features['labels'] = features.pop('qa_label')
+    features['labels'] = features.pop('label')
 
     # do this so we don't have to mask
     frame_is_valid = tf.cast(tf.less(tf.range(config['num_segments']), features['num_frames']), dtype=tf.float32)
@@ -279,6 +279,7 @@ def make_dataset_singleimg(config, fns, preprocessor, batch_size, num_devices=1,
     dataset = dataset.batch(batch_size=batch_size, drop_remainder=is_training)
     def _handle_batch(batched_tensor):
         for k in batched_tensor.keys():
+            
             batched_tensor[k] = tf.reshape(batched_tensor[k],
                                            [num_devices, batch_size // num_devices] +
                                            get_shape_list(batched_tensor[k])[1:])
@@ -363,11 +364,10 @@ def finetune_val_input_fn_builder(config, preprocessor_type):
         yield ids, item
 
 
-'''
-config = {'train_fns': '/home/aobolens/Social_IQ/raw/tfrecords/train{:03d}of128.tfrecord', 'num_train_files': 128, 'use_audio_token_prob': 0.5, 'random_scale_max': 1.1, 'random_scale_min': 1.0, 'fft_hop_length': 588, 'fft_window_size': 1536, 'num_mels': 64, 'sample_rate': 22050, 'spec_size': 188, 'mask_rate': 0.25, 'num_audio2text_seqs': 1, 'num_text2audio_seqs': 1, 'num_text_seqs': 1, 'num_text_seqs_in_record': 1, 'num_segments': 7, 'num_segment_groups': 2, 'num_audio_subsegments': 3, 'seq_len': 640, 'lang_seq_len': 256, 'num_text_spans_to_include': 48, 'text_span_budget': 38, 'num_answers': 4, 'val_fns': '/home/aobolens/Social_IQ/raw/tfrecords/val{:03d}of016.tfrecord', 'num_val_files': 16, 'do_random_scale': False, 'batch_size': 32, 'hidden_size': 768, 'joint_num_layers': 12, 'use_bfloat16': True, 'audio_num_layers': 12, 'audio_patch_size': 2, 'audio_seq_length': 60, 'audio_token_length': 6, 'output_grid': [18, 32], 'vit_patch_size': 16, 'vit_pooling_ratio': 2, 'vit_num_layers': 12, 'span_num_layers': 4, 'text_span_length': 15}
-dataset = tf.data.TFRecordDataset(['/home/aobolens/Social_IQ/raw/tfrecords/val000of016.tfrecord'], num_parallel_reads=1)
-def prep(x):
-    return preprocess_tvqa(x, config)
-for x in dataset:
-    prep(x)
-'''
+if __name__ == '__main__':
+    config = {'train_fns': '/home/aobolens/urfunny/finetune/train{:03d}of064.tfrecord', 'num_train_files': 64, 'use_audio_token_prob': 0.5, 'random_scale_max': 1.1, 'random_scale_min': 1.0, 'fft_hop_length': 588, 'fft_window_size': 1536, 'num_mels': 64, 'sample_rate': 22050, 'spec_size': 188, 'mask_rate': 0.25, 'num_audio2text_seqs': 1, 'num_text2audio_seqs': 1, 'num_text_seqs': 1, 'num_text_seqs_in_record': 1, 'num_segments': 7, 'num_segment_groups': 2, 'num_audio_subsegments': 3, 'seq_len': 640, 'lang_seq_len': 256, 'num_text_spans_to_include': 48, 'text_span_budget': 38, 'num_answers': 1, 'val_fns': '/home/aobolens/urfunny/finetune/val{:03d}of008.tfrecord', 'num_val_files': 8, 'do_random_scale': False, 'batch_size': 32, 'hidden_size': 768, 'joint_num_layers': 12, 'use_bfloat16': True, 'audio_num_layers': 12, 'audio_patch_size': 2, 'audio_seq_length': 60, 'audio_token_length': 6, 'output_grid': [18, 32], 'vit_patch_size': 16, 'vit_pooling_ratio': 2, 'vit_num_layers': 12, 'span_num_layers': 4, 'text_span_length': 15}
+    dataset = tf.data.TFRecordDataset(['/home/aobolens/urfunny/finetune/val000of008.tfrecord'], num_parallel_reads=1)
+    def prep(x):
+        return preprocess_tvqa(x, config)
+    for x in dataset:
+        prep(x)
