@@ -4,7 +4,7 @@
 # bsize of 1024 so 75596 is one epoch
 
 data:
-  train_fns: "/home/aobolens/Social_IQ/raw/siq/train{:03d}of128.tfrecord"
+  train_fns: "/home/aobolens/Social_IQ/raw/siq/train{:03d}of064.tfrecord"
   num_train_files: 128
 
   use_audio_token_prob: 0.5

@@ -2,7 +2,7 @@ import os
 import subprocess
 
 def video_to_mp3(data_dir):
-    video_dir = os.path.join(data_dir, "urfunny2_videos")
+    video_dir = os.path.join(data_dir, "vision_concat")
     vid_names = os.listdir(video_dir)
     audio_dir = os.path.join(data_dir, "acoustic")
     for vid in vid_names:
@@ -26,4 +26,4 @@ def mp3_to_wav(data_dir):
             subprocess.call('ffmpeg -i {video} -acodec pcm_s16le -ac 1 -ar 22050 {out_name}'.format(video=mp3_file_path, out_name=output), shell=True)
 
 if __name__ == "__main__":
-    mp3_to_wav("/home/aobolens/urfunny")
+    mp3_to_wav("/home/aobolens/mustard")

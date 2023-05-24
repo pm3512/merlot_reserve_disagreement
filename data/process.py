@@ -49,14 +49,14 @@ parser.add_argument(
 parser.add_argument(
     '-num_folds',
     dest='num_folds',
-    default=128,
+    default=8,
     type=int,
     help='Number of folds (corresponding to both the number of training files and the number of testing files)',
 )
 parser.add_argument(
     '-ids_fn',
     dest='ids_fn',
-    default=os.path.join(os.environ['DATA_DIR'], 'train_dev.csv'),
+    default=os.path.join(os.environ['DATA_DIR'], 'all.csv'),
     type=str,
     help='We will use these IDs. you probably should filter them to mkae sure they all at least have the right files. can start with gs://'
 )
@@ -139,6 +139,7 @@ parser.add_argument(
 
 args = parser.parse_args()
 
+
 # gclient = storage.Client()
 encoder = get_encoder()
 
@@ -160,10 +161,19 @@ def load_pickle(pickle_file):
 
 MEGA_WINDOW_SIZE = 5.0
 
+'''
 language_sdk = load_pickle(os.environ['LANGUAGE_PATH'])
 print('len before', len(language_sdk))
 language_sdk = {k: v for k, v in language_sdk.items() if v['punchline_intervals'][-1][-1] > MEGA_WINDOW_SIZE + 1 }
 print('len after', len(language_sdk))
+'''
+
+duration_fn = os.path.join(os.environ["DATA_DIR"], 'durations.csv')
+audio_durations = {}
+
+durations = pd.read_csv(duration_fn)
+for _, row in durations.iterrows():
+    audio_durations[row['filename'][:-4]] = row['duration']
 
 ###########################################
 # MEGA_WINDOW_SIZE = 10.0
@@ -272,15 +282,58 @@ def load_video(video_id):
     '''
 
     data = {"word": [], "start": [], "end": []}
-    language_data = language_sdk[int(video_id)]
-    text = ' '.join(language_data['context_sentences']) + ' ' + language_data['punchline_sentence']
-    timestamps = np.concatenate(language_data['context_intervals'])
-    timestamps = np.concatenate((timestamps, language_data['punchline_intervals'])).tolist()
+    ts_filename = os.path.join(os.environ['DATA_DIR'], 'align', video_id + '.json')
+    with open(ts_filename, 'r') as f:
+        language_data = json.load(f)
 
-    for word, ts in zip(text.split(), timestamps):
-        data['word'].append(word)
-        data['start'].append(ts[0])
-        data['end'].append(ts[1])
+    for w in language_data['words']:
+        data['word'].append(w['word'])
+        data['start'].append(w['start'] if w['case'] == 'success' else None)
+        data['end'].append(w['end'] if w['case'] == 'success' else None)
+    prev_success_offsets = []
+
+    for i, w in enumerate(language_data['words']):
+        if data['start'][i] is not None:
+            prev_success_offsets.append(i)
+        elif len(prev_success_offsets) == 0:
+            prev_success_offsets.append(0)
+        else:
+            prev_success_offsets.append(prev_success_offsets[-1])
+    
+    prev_success_offsets_suffix = []
+    for i, w in enumerate(data['word'][::-1]):
+        j = len(data['word']) - i - 1
+        if data['start'][j] is not None:
+            prev_success_offsets_suffix.append(j)
+        elif len(prev_success_offsets_suffix) == 0:
+            prev_success_offsets_suffix.append(-1)
+        else:
+            prev_success_offsets_suffix.append(prev_success_offsets_suffix[-1])
+    prev_success_offsets_suffix = prev_success_offsets_suffix[::-1]
+
+    for i, w in enumerate(data['word']):
+        if data['start'][i] is None:
+            try:
+                off = len(w)
+                prev_succ = prev_success_offsets[i]
+                next_succ = prev_success_offsets_suffix[i]
+                off_diff = language_data['words'][next_succ]['startOffset'] - language_data['words'][prev_succ]['endOffset']
+                ts_diff = data['end'][next_succ] - data['start'][prev_succ]
+                time_per_offset = ts_diff / off_diff
+                start_offset = language_data['words'][i]['startOffset']
+                end_offset = language_data['words'][i]['endOffset']
+                start_offset_ts = data['end'][prev_succ] + time_per_offset * (start_offset - language_data['words'][prev_succ]['endOffset'])
+                end_offset_ts = data['end'][prev_succ] + time_per_offset * (end_offset - language_data['words'][prev_succ]['endOffset'])
+                data['start'][i] = start_offset_ts
+                data['end'][i] = end_offset_ts
+            except Exception:
+                if i == 0:
+                    data['start'][i] = 0
+                    data['end'][i] = 0
+                else:
+                    data['start'][i] = data['end'][i-1]
+                    data['end'][i] = data['end'][i-1]
+
 
     item['transcripts'] = data
     item['duration'] = data['end'][-1]
@@ -334,7 +387,8 @@ def video_iterator():
         reader = csv.DictReader(f)
         for i, row in enumerate(reader):
             if i % args.num_folds == args.fold:
-                channels_video_ids.append(row['video_id'])
+                if audio_durations[row['idx']] > MEGA_WINDOW_SIZE + 1:
+                    channels_video_ids.append(row['idx'])
     if args.shuffle_fns:
         random.shuffle(channels_video_ids)
     print("GOT THE VIDEO IDS - {} in total".format(len(channels_video_ids)), flush=True)
@@ -342,11 +396,10 @@ def video_iterator():
         time.sleep(5.0)  # race condition? idk
         raise ValueError("Couldnt load video ids")
     for video_id in channels_video_ids:
-        if int(video_id) in language_sdk:
-            print("LOADING VIDEO {}, {}".format(video_id, args.fold), flush=True)
-            video = load_video(video_id)
-            if video is not None:
-                yield video
+        print("LOADING VIDEO {}, {}".format(video_id, args.fold), flush=True)
+        video = load_video(video_id)
+        if video is not None:
+            yield video
 
 def get_librosa_params(sr, playback_speed):
     params = {
@@ -799,7 +852,7 @@ with GCSTFRecordWriter(train_file, buffer_size=10000, auto_close=False) as train
                 feats[f'c{i:02d}/{k}'] = v
 
         example = tf.train.Example(features=tf.train.Features(feature=feats))
-        #train_writer.write(example.SerializeToString())
+        train_writer.write(example.SerializeToString())
         num_written += 1
         if num_written % 10 == 0:
             te = time.time() - st

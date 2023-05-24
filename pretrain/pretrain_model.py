@@ -5,6 +5,9 @@ from flax.training import train_state
 from mreserve.checkpoint import f32_to_bf16, bf16_to_f32
 import wandb
 
+#exclusions_list = ['vision', 'audio', 'text']
+exclusions_list = ['vision', 'audio', 'nothing']
+
 
 class MerlotReservePretrainer(MerlotReserve):
     def _augment_video_src_idx(self, video_src_idx, prng_key):
@@ -43,71 +46,91 @@ class MerlotReservePretrainer(MerlotReserve):
         :param batch: Everything from pretraining
         :return:
         """
-        result = {'similarities': {}}
-        for vision_mode in ['vision', 'no_vision']:
-            num_segment_groups = self.data['num_segment_groups']
-            num_audio_subsegments = self.data['num_audio_subsegments']
-            lang_seq_len = self.data['lang_seq_len']
-            seq_len = self.data['seq_len']
+        result = {}
+        num_segment_groups = self.data['num_segment_groups']
+        num_audio_subsegments = self.data['num_audio_subsegments']
+        lang_seq_len = self.data['lang_seq_len']
+        seq_len = self.data['seq_len']
 
-            batch_size, num_segments_nvpatch0, pp3 = batch['images'].shape
-            nvpatch0 = self.output_grid[0] * self.output_grid[1]
-            num_segments = num_segments_nvpatch0 // nvpatch0
-            num_segments_per_group = num_segments // num_segment_groups
+        batch_size, num_segments_nvpatch0, pp3 = batch['images'].shape
+        nvpatch0 = self.output_grid[0] * self.output_grid[1]
+        num_segments = num_segments_nvpatch0 // nvpatch0
+        num_segments_per_group = num_segments // num_segment_groups
 
-            # Images is size [batch_size * num_segments, num_patch, H]
-            imgs_enc = self.vision_encoder(batch['images'].reshape((batch_size * num_segments, nvpatch0, pp3)))
+        # Images is size [batch_size * num_segments, num_patch, H]
+        imgs_enc = self.vision_encoder(batch['images'].reshape((batch_size * num_segments, nvpatch0, pp3)))
 
-            nvpatch1 = nvpatch0 // (self.vit_pooling_ratio ** 2)
-            imgs_seq = imgs_enc['seq_attnpool'].reshape(
-                [batch_size, num_segment_groups, num_segments_per_group * nvpatch1, self.hidden_size])
+        nvpatch1 = nvpatch0 // (self.vit_pooling_ratio ** 2)
+        imgs_seq = imgs_enc['seq_attnpool'].reshape(
+            [batch_size, num_segment_groups, num_segments_per_group * nvpatch1, self.hidden_size])
 
-            if vision_mode == 'no_vision':
+        vis_seq_length = imgs_seq.shape[-2]
+
+        # Audio clips are provided as [batch_size, num_segments * num_audio_subsegments * audio_seq_len, num_mels]
+        audio_enc = self.audio_encoder(batch['audio_clips'].reshape(
+            (batch_size * num_segments * num_audio_subsegments, self.audio_seq_length, -1)))
+
+
+        # Audio seq is now [batch_size, num_audio_spans, seq_len, H]
+        num_audio_spans = num_segments * num_audio_subsegments
+        audio_seq = audio_enc['seq_attnpool'].reshape(
+            [batch_size, num_audio_spans, self.audio_token_length, self.config['hidden_size']])
+        audio_cls = audio_enc['cls'].reshape([batch_size, num_audio_spans, self.config['hidden_size']])
+
+        # Flatten text sequence
+        for k1 in ['text2audio', 'audio2text']:
+            for k2 in ['', '/audio_ptr', '/text_ptr']:
+                k = k1 + k2
+                batch[k] = batch[k].reshape((-1, lang_seq_len))
+
+        for k in ['random_text', 'random_text/text_ptr', 'audio_text_matching', 'audio_text_matching/audio_ptr']:
+            batch[k] = batch[k].reshape((-1, seq_len))
+
+        batch['text_spans'] = batch['text_spans'].reshape((-1, self.text_span_length))
+
+        ##############################################
+
+        txt_embs = self.token_encoder(
+            {k: batch[k] for k in ['text2audio', 'audio2text', 'audio_text_matching', 'text_spans', 'random_text']})
+        
+        batch['video_src_index'] = batch['video_src_index'].reshape(-1, num_segments_per_group)
+
+        mm_inputs = {}
+        prng_0 = batch['audio2text/text_ptr'].astype(jnp.uint32).sum()[None].repeat(2)
+        prngs = jax.random.split(prng_0, num=3)
+
+        num_audio2text_seqs = self.data['num_audio2text_seqs']
+
+        for exclude in exclusions_list:
+
+            if exclude == 'text':
+                txt_embs_replaced = {}
+                for k in txt_embs:
+                    txt_embs_replaced[k] = txt_embs[k] * 0.0
+            else:
+                txt_embs_replaced = txt_embs
+
+            audio_seq_replaced = audio_seq * 0.0 if exclude == 'audio' else audio_seq
+
+            mm_inputs['audio_text_matching'] = self.prepare_multimodal_inputs(
+                tokens=batch['audio_text_matching'],
+                token_segment_idx=jnp.cumsum((batch['audio_text_matching'] == LTOVPOOL).astype(jnp.int32), -1),
+                token_embs=txt_embs_replaced['audio_text_matching'],
+                audio_spans=audio_seq_replaced,
+                audio_pointers=batch['audio_text_matching/audio_ptr'],
+                padding_len=seq_len,
+            )
+
+
+            if exclude == 'vision':
                 print("\nNO VISION\n\n\n!!!!\n\n\n", flush=True)
+                imgs_seq_copy = imgs_seq
                 imgs_seq *= 0.0
 
-            vis_seq_length = imgs_seq.shape[-2]
-
-            # Audio clips are provided as [batch_size, num_segments * num_audio_subsegments * audio_seq_len, num_mels]
-            audio_enc = self.audio_encoder(batch['audio_clips'].reshape(
-                (batch_size * num_segments * num_audio_subsegments, self.audio_seq_length, -1)))
-
-
-            # Audio seq is now [batch_size, num_audio_spans, seq_len, H]
-            num_audio_spans = num_segments * num_audio_subsegments
-            audio_seq = audio_enc['seq_attnpool'].reshape(
-                [batch_size, num_audio_spans, self.audio_token_length, self.config['hidden_size']])
-            audio_cls = audio_enc['cls'].reshape([batch_size, num_audio_spans, self.config['hidden_size']])
-
-            audio_seq_replaced = audio_seq * 0.0 if vision_mode == 'vision' else audio_seq
-
-            # Flatten text sequence
-            for k1 in ['text2audio', 'audio2text']:
-                for k2 in ['', '/audio_ptr', '/text_ptr']:
-                    k = k1 + k2
-                    batch[k] = batch[k].reshape((-1, lang_seq_len))
-
-            for k in ['random_text', 'random_text/text_ptr', 'audio_text_matching', 'audio_text_matching/audio_ptr']:
-                batch[k] = batch[k].reshape((-1, seq_len))
-
-            batch['text_spans'] = batch['text_spans'].reshape((-1, self.text_span_length))
-
-            ##############################################
-
-            txt_embs = self.token_encoder(
-                {k: batch[k] for k in ['text2audio', 'audio2text', 'audio_text_matching', 'text_spans', 'random_text']})
-
-            batch['video_src_index'] = batch['video_src_index'].reshape(-1, num_segments_per_group)
-
-            mm_inputs = {}
-            prng_0 = batch['audio2text/text_ptr'].astype(jnp.uint32).sum()[None].repeat(2)
-            prngs = jax.random.split(prng_0, num=3)
-
-            num_audio2text_seqs = self.data['num_audio2text_seqs']
             mm_inputs['audio2text'] = self.prepare_multimodal_inputs(
                 tokens=batch['audio2text'],
                 token_segment_idx=(batch['audio2text/audio_ptr'] // num_audio_subsegments) % num_segments_per_group,
-                token_embs=txt_embs['audio2text'],
+                token_embs=txt_embs_replaced['audio2text'],
                 vision_input=jnp.tile(imgs_seq, [1, num_audio2text_seqs, 1, 1]).reshape(-1, vis_seq_length,
                                                                                         self.hidden_size),
                 audio_spans=audio_seq_replaced.repeat(num_segment_groups * num_audio2text_seqs, axis=0),
@@ -119,20 +142,11 @@ class MerlotReservePretrainer(MerlotReserve):
                                                         prngs[0]),
             )
 
-            mm_inputs['audio_text_matching'] = self.prepare_multimodal_inputs(
-                tokens=batch['audio_text_matching'],
-                token_segment_idx=jnp.cumsum((batch['audio_text_matching'] == LTOVPOOL).astype(jnp.int32), -1),
-                token_embs=txt_embs['audio_text_matching'],
-                audio_spans=audio_seq,
-                audio_pointers=batch['audio_text_matching/audio_ptr'],
-                padding_len=seq_len,
-            )
-
             num_text2audio_seqs = self.data['num_text2audio_seqs']
             mm_inputs['text2audio'] = self.prepare_multimodal_inputs(
                 tokens=batch['text2audio'],
                 token_segment_idx=(batch['text2audio/audio_ptr'] // num_audio_subsegments) % num_segments_per_group,
-                token_embs=txt_embs['text2audio'],
+                token_embs=txt_embs_replaced['text2audio'],
                 vision_input=jnp.tile(imgs_seq, [1, num_text2audio_seqs, 1, 1]).reshape(-1, vis_seq_length,
                                                                                         self.hidden_size),
                 audio_pointers=batch['text2audio/audio_ptr'],
@@ -143,6 +157,9 @@ class MerlotReservePretrainer(MerlotReserve):
                                                         prngs[1]),
             )
             mm_inputs['random_text'] = self.prepare_multimodal_inputs(tokens=batch['random_text'], padding_len=seq_len)
+
+            if exclude == 'vision':
+                imgs_seq = imgs_seq_copy
 
             keys = sorted(mm_inputs.keys())
             x = jnp.concatenate([mm_inputs[k]['x'] for k in keys], 0)
@@ -262,35 +279,54 @@ class MerlotReservePretrainer(MerlotReserve):
                         outputs[k][k2_extra] = unit_normalize(outputs[k][k2_extra]) * temp_to_use
                         if self.use_bfloat16:
                             outputs[k][k2_extra] = outputs[k][k2_extra].astype(jnp.bfloat16)
-                if vision_mode == 'no_vision':
-                    similarity = ((outputs[k]['x'] * result['vision'][k]['x']).sum(-1) / (temp_to_use ** 2)).mean()
-                    result['similarities'][k] = similarity
 
-            result[vision_mode] = outputs
+
+            result[exclude] = outputs
+        for modal in exclusions_list:
+            included = [k for k in exclusions_list if k != modal]
+            mod1 = included[0]
+            mod2 = included[1]
+            result[f'similarities_{mod1}_{mod2}'] = {}
+            #result[f'detailed_similarities_{mod1}_{mod2}'] = {}
+            for k in result[mod1]:
+                similarity = ((result[mod1][k]['x'] * result[mod2][k]['x']).sum(-1) / (temp_to_use ** 2))
+                result[f'similarities_{mod1}_{mod2}'][k] = similarity.mean()
+                #result[f'detailed_similarities_{mod1}_{mod2}'][k] = similarity
 
         print("Done with forward pass", flush=True)
         print('outputs.keys()', result.keys(), flush=True)
         return result
 
 
-def reweight(loss, loss_nv, sim_loss, thresholds):
+def reweight(loss, loss_nv, loss_nt, loss_nothing, sim_loss, thresholds):
     #loss_nograd = jax.lax.stop_gradient(loss)
     #loss_nv_nograd = jax.lax.stop_gradient(loss_nv)
-    loss_t = jax.lax.cond(loss > thresholds['video_threshold'], lambda _: loss, lambda _: jnp.zeros_like(loss), operand=None)
-    loss_nv_t = jax.lax.cond(loss_nv > thresholds['audio_threshold'], lambda _: loss_nv, lambda _: jnp.zeros_like(loss_nv), operand=None)
-    loss_sim_t = jax.lax.cond(sim_loss > thresholds['sim_threshold'], lambda _:sim_loss, lambda _: jnp.zeros_like(sim_loss), operand=None)
-    reweight_loss = loss_t + loss_nv_t + loss_sim_t
+    #loss_t = jax.lax.cond(loss > thresholds['video_threshold'], lambda _: loss, lambda _: jnp.zeros_like(loss), operand=None)
+    #loss_nv_t = jax.lax.cond(loss_nv > thresholds['audio_threshold'], lambda _: loss_nv, lambda _: jnp.zeros_like(loss_nv), operand=None)
+    #loss_nt_t = jax.lax.cond(loss_nt > thresholds['text_threshold'], lambda _: loss_nt, lambda _: jnp.zeros_like(loss_nt), operand=None)
+    sim_video = sim_loss['similarities_audio_nothing']
+    sim_audio = sim_loss['similarities_vision_nothing']
+    sim_nothing = sim_loss['similarities_vision_audio']
+
+    loss_sim_v = jax.lax.cond(sim_video > thresholds['sim_threshold_video'], lambda _:sim_video - thresholds['sim_threshold_video'], lambda _: jnp.zeros_like(sim_video), operand=None)
+    loss_sim_a = jax.lax.cond(sim_audio > thresholds['sim_threshold_audio'], lambda _:sim_audio - thresholds['sim_threshold_audio'], lambda _: jnp.zeros_like(sim_audio), operand=None)
+    loss_sim_t = jax.lax.cond(sim_nothing > thresholds['sim_threshold_text'], lambda _:sim_nothing - thresholds['sim_threshold_text'], lambda _: jnp.zeros_like(sim_nothing), operand=None)
+    #reweight_loss = (loss_t + loss_nv_t + loss_nothing) / 3 + loss_sim_t + loss_sim_a + loss_sim_v
+    #reweight_loss = (loss_t + loss_nv_t + loss_nt_t) / 3 + (loss_sim_t + loss_sim_a + loss_sim_v) / 3
+    reweight_loss = loss_nothing + (loss_sim_t + loss_sim_a + loss_sim_v) / 3
+    #reweight_loss = loss_nothing + loss_sim_v
+    #reweight_loss = (loss_t + loss_nv_t) / 2 + loss_sim_t + loss_sim_a + loss_sim_v
     return reweight_loss
 
 def loss_fn_given_preds(preds, should_reweight, thresholds):
     print('running loss_fn_given_preds', flush=True)
     losses = {}
-    for vision_mode in ['vision', 'no_vision']:
+    for exclude in exclusions_list:
         loss_info = {}
 
-        if 'text_preds' in preds[vision_mode]:
+        if 'text_preds' in preds[exclude]:
             # Special-case of mask LM loss
-            text_preds = preds[vision_mode].pop('text_preds')
+            text_preds = preds[exclude].pop('text_preds')
             logits = text_preds['logits']
             labels = jax.nn.one_hot(text_preds['labels'], num_classes=logits.shape[1], dtype=logits.dtype)
             logprobs = jax.nn.log_softmax(logits, axis=-1)
@@ -298,7 +334,7 @@ def loss_fn_given_preds(preds, should_reweight, thresholds):
 
             loss_info['audio2text'] = -(jnp.sum(logprobs * labels, axis=-1) * mask).sum() / mask.sum()
 
-        for c_type, c_dict in preds[vision_mode].items():
+        for c_type, c_dict in preds[exclude].items():
             numer_logits = (c_dict['x'] * c_dict['y']).sum(-1)
             loss_info[c_type] = 0.0
 
@@ -326,19 +362,27 @@ def loss_fn_given_preds(preds, should_reweight, thresholds):
                         loss_info[f'_{c_type}_from_{type_i}'] += loss_match / 2.0
 
         loss = sum([v for k, v in loss_info.items() if not k.startswith('_')])
-        losses[vision_mode] = (loss, loss_info)
+        losses[exclude] = (loss, loss_info)
 
-    assert preds['vision'].keys() == preds['no_vision'].keys()
-    losses['similarities'] = preds['similarities']
-    sim_loss = sum([v for k, v in preds['similarities'].items()])
+    sim_loss = {}
+    for k in preds:
+        if k.startswith('similarities'):
+            losses[k] = preds[k]
+            sim_loss[k] = sum(preds[k].values())
+        elif k.startswith('detailed'):
+            losses[k] = preds[k]
     print("Done with loss_fn_given_preds", flush=True)
     if should_reweight:
-        reweighted = reweight(losses['vision'][0], losses['no_vision'][0], sim_loss, thresholds)
+        #reweighted = reweight(losses['audio'][0], losses['vision'][0], losses['text'][0], None, sim_loss, thresholds)
+        #reweighted = reweight(losses['audio'][0], losses['vision'][0], None, losses['nothing'][0], sim_loss, thresholds)
+        reweighted = reweight(None, None, None, losses['nothing'][0], sim_loss, thresholds)
         losses['reweighted'] = reweighted
         return reweighted, losses
-    return (losses['vision'][0] ), losses
+    #return (losses['vision'][0] ), losses
     #return (losses['vision'][0] + losses['no_vision'][0]) / 2 + sim_loss, losses
     #return (losses['vision'][0] + losses['no_vision'][0]) / 2, losses
+    assert False
+    return (losses['text'][0] + losses['vision'][0] + losses['audio'][0]) / 3 + sim_loss, losses
 
 
 def train_step(state: train_state.TrainState, batch, reweight, thresholds, use_bfloat16_grads=True):
@@ -363,10 +407,18 @@ def train_step(state: train_state.TrainState, batch, reweight, thresholds, use_b
         params = f32_to_bf16(state.params)
 
     losses, grads = grad_fn(params)
-    (loss, loss_info) = losses[1]['vision']
-    (loss_nv, loss_info_nv) = losses[1]['no_vision']
-    for c_type, c_loss in losses[1]['similarities'].items():
-        loss_info[f'similarities_{c_type}'] = c_loss
+    loss_info = {}
+    total_loss = {}
+    for exclude in exclusions_list:
+        for k, v in losses[1][exclude][1].items():
+            loss_info[f'{exclude}_{k}'] = v
+        total_loss[exclude] = losses[1][exclude][0]
+    
+    for k in losses[1]:
+        if k.startswith('similarities') or k.startswith('detailed'):
+            for c_type, c_loss in losses[1][k].items():
+                loss_info[f'{k}_{c_type}'] = c_loss
+
     if reweight:
         loss_reweighted = losses[1]['reweighted']
 
@@ -378,10 +430,10 @@ def train_step(state: train_state.TrainState, batch, reweight, thresholds, use_b
         grads = bf16_to_f32(grads)
 
     # Average metrics over all replicas (maybe this isn't a great idea, idk)
-    loss_info = jax.lax.pmean(loss_info, axis_name='batch')
+    #loss_info = jax.lax.pmean(loss_info, axis_name='batch')
     loss_info = bf16_to_f32(loss_info)
 
     new_state = state.apply_gradients(grads=grads)
     if reweight:
-        return new_state, (loss_info, loss, loss_nv, loss_reweighted)
-    return new_state, (loss_info, loss, loss_nv)
+        return new_state, (loss_info, total_loss, loss_reweighted)
+    return new_state, (loss_info, total_loss)

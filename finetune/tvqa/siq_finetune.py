@@ -106,6 +106,16 @@ parser.add_argument(
     '--run_name',
     type=str
 )
+
+parser.add_argument(
+    '--dataset',
+    type=str,
+)
+parser.add_argument(
+    '--sim_threshold',
+    type=float,
+    default=0.,
+)
 args = parser.parse_args()
 
 # DEBUG
@@ -116,20 +126,40 @@ with open(args.pretrain_config_file, 'r') as f:
     config = yaml.load(f, yaml.FullLoader)
 
 
-config['data']['train_fns'] = os.path.join(os.environ["FINETUNE_TFRECORDS_PATH"], "train{:03d}of0" + os.environ["NUM_TRAIN_TFRECORDS"] + ".tfrecord")
-config['data']['num_train_files'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
-#config['data']['num_answers'] = 4
+config['data']['num_answers'] = 1
 config['data']['random_scale_max'] = 1.1
 config['data']['random_scale_min'] = 1.0
 config['data']['num_segments'] = 7
+config['data']['sim_threshold'] = args.sim_threshold
 
 config['device']['batch_size'] = 8
 config['device']['prefetch_size'] = 0
-config['device']['n_fns_per_cycle'] = int(os.environ["NUM_TRAIN_TFRECORDS"])
+config['data']['dataset'] = args.dataset
+if args.dataset == 'urfunny':
+    config['data']['num_train_files'] = 64
+    config['data']['train_fns'] = '/home/aobolens/urfunny/finetune/train{:03d}of064.tfrecord'
+    config['data']['val_fns'] = '/home/aobolens/urfunny/finetune/val{:03d}of008.tfrecord'
+    config['data']['num_val_files'] = 8
+    TRAIN_SIZE = 7614
+    output_dir = "/home/aobolens/urfunny/out"
+elif args.dataset == 'social_iq':
+    config['data']['num_train_files'] = 64
+    config['data']['train_fns'] = '/home/aobolens/social_iq/finetune/train{:03d}of064.tfrecord'
+    config['data']['val_fns'] = '/home/aobolens/social_iq/finetune/val{:03d}of008.tfrecord'
+    config['data']['num_val_files'] = 8
+    TRAIN_SIZE = 17494
+    output_dir = "/home/aobolens/social_iq/out"
+else:
+    assert args.dataset == 'mustard'
+    config['data']['num_train_files'] = 8
+    config['data']['train_fns'] = '/home/aobolens/mustard/finetune/train{:03d}of008.tfrecord'
+    config['data']['val_fns'] = '/home/aobolens/mustard/finetune/val{:03d}of001.tfrecord'
+    config['data']['num_val_files'] = 1
+    TRAIN_SIZE = 552
+    output_dir = "/home/aobolens/mustard/out"
+config['device']['n_fns_per_cycle'] =config['data']['num_train_files']
 
 NUM_EPOCH = args.ne
-#TRAIN_SIZE = 17494
-TRAIN_SIZE = 7614
 steps_per_epoch = TRAIN_SIZE // config['device']['batch_size']
 config['optimizer'] = {
     'beta_2': 0.98,
@@ -148,7 +178,7 @@ cfg_name = args.pretrain_config_file.split('/')[-1]
 seattle_time = pytz.utc.localize(datetime.utcnow()).astimezone(pytz.timezone('America/Los_Angeles'))
 seattle_time = seattle_time.strftime("%Y-%m-%d-%H:%M.%S")
 
-config['device']['output_dir'] = os.path.join(os.environ["OUTPUT_PATH"], cfg_name)
+config['device']['output_dir'] = os.path.join(output_dir, cfg_name)
 if args.output_name != '':
     config['device']['output_dir'] = os.path.join(config['device']['output_dir'], args.output_name)
 config['device']['output_dir'] = os.path.join(config['device']['output_dir'], seattle_time)
@@ -160,7 +190,7 @@ ds_train_iter = finetune_input_fn_builder(config, 'tvqa')
 
 
 config['_ckpt'] = args.ckpt
-tags = [cfg_name, 'urfunny']
+tags = [cfg_name, 'dataset_' + args.dataset]
 if args.output_name != '':
     tags.append(args.output_name)
 # if (jax.process_index() == 0):
@@ -269,6 +299,10 @@ class MerlotReserveTVQA(MerlotReserve):
         logits_from_audio, logits_from_text = jnp.split(joint_enc, 2, axis=0)
         logits_from_audio = logits_from_audio.reshape(batch_size)
         logits_from_text = logits_from_text.reshape(batch_size)
+        '''
+        logits_from_audio = logits_from_audio.reshape(batch_size, num_ans_per)
+        logits_from_text = logits_from_text.reshape(batch_size, num_ans_per)
+        '''
 
         return logits_from_audio, logits_from_text
 
@@ -297,16 +331,20 @@ def train_loss_fn(state, params, batch):
     labels = batch['labels']
     audio_cross_entropy = -jnp.mean(labels * jnp.log(lprobs_from_audio) + (1 - labels) * jnp.log(1 - lprobs_from_audio), axis=-1)
     text_cross_entropy = -jnp.mean(labels * jnp.log(lprobs_from_text) + (1 - labels) * jnp.log(1 - lprobs_from_text), axis=-1)
-    loss = audio_cross_entropy + text_cross_entropy
     pred_audio = (lprobs_from_audio > 0.5).astype(jnp.int32) 
     is_right_audio = (pred_audio == labels).astype(jnp.float32).mean()
     preds_text = (lprobs_from_text > 0.5).astype(jnp.int32)
     is_right_text = (preds_text == labels).astype(jnp.float32).mean()
+    preds_distance = jnp.abs(lprobs_from_audio - lprobs_from_text).mean()
+
+    #preds_distance = jax.lax.cond(preds_distance > config['data']['sim_threshold'], lambda _: preds_distance, lambda _: jnp.zeros_like(preds_distance), operand=None)
+    #loss = jnp.maximum(audio_cross_entropy + text_cross_entropy - 0.01 * preds_distance, 0)
+    loss = audio_cross_entropy + text_cross_entropy
+    
 
     return loss, {'train_audio_acc': is_right_audio, 'train_text_acc': is_right_text,
-                  'train_audio_loss': audio_cross_entropy, 'train_text_loss': text_cross_entropy}
+                  'train_audio_loss': audio_cross_entropy, 'train_text_loss': text_cross_entropy, 'preds_distance': preds_distance}
 
-    
     '''
     lprobs_from_audio = jax.nn.log_softmax(logits_from_audio, axis=-1)
     lprobs_from_text = jax.nn.log_softmax(logits_from_text, axis=-1)
@@ -325,6 +363,7 @@ def train_loss_fn(state, params, batch):
     return loss, {'train_audio_acc': is_right_audio, 'train_text_acc': is_right_text,
                   'train_audio_loss': loss_audio, 'train_text_loss': loss_text,}
     '''
+    
 
 
 
@@ -338,7 +377,7 @@ def pred_step(state: train_state.TrainState, batch):
             'preds_audio': logits_from_audio > 0.5,
             'logprobs_text': jax.nn.sigmoid(logits_from_text),
             'preds_text': logits_from_text > 0.5,
-            'preds_joint': (jax.nn.sigmoid(logits_from_audio) + jax.nn.sigmoid(logits_from_text)) > 0.5,
+            'preds_joint': (jax.nn.sigmoid(logits_from_audio) + jax.nn.sigmoid(logits_from_text)) > 1.0,
             }
     '''
     out = {'logprobs_audio': jax.nn.log_softmax(logits_from_audio, axis=-1),
@@ -362,8 +401,8 @@ def val_epoch(state: train_state.TrainState, prefix='val'):
     :return:
     """
     val_config = deepcopy(config)
-    val_config['data']['val_fns'] = os.path.join(os.environ["FINETUNE_TFRECORDS_PATH"], prefix + "{:03d}of00" + os.environ["NUM_VAL_TFRECORDS"] + ".tfrecord")
-    val_config['data']['num_val_files'] = int(os.environ["NUM_VAL_TFRECORDS"])
+    val_config['data']['val_fns'] = val_config['data']['val_fns'].replace('val', prefix)
+    #val_config['data']['num_val_files'] = int(config['data']['num_val_files'])
     val_config['data']['do_random_scale'] = False
     val_config['data']['batch_size'] = args.val_batch_size
 
@@ -438,22 +477,25 @@ for n in range(config['optimizer']['num_train_steps']+100):
             if wandb is not None:
                 wandb.log(train_metrics[step_for_logging], step=step_for_logging, commit=True) #(n + 1) % log_every == 0)
 
-        if (n + 1) % 500 == 0: # do val every 500 steps
+        #if (n + 1) % 68 == 0: # do val every 500 steps
+        '''
+        if (n + 1) % 500 == 0 and n >= 2000: # do val every 500 steps
             print("Done 500 steps, doing validation", flush=True)
 
             val_info = val_epoch(state)
             print(f"Saving @iter {n:03d}.\nInfo: {pd.Series(val_info)}\n~\n", flush=True)
             if wandb is not None:
                 wandb.log({'joint_acc_val': val_info['joint_acc']}, step=step_for_logging, commit=True)
+        '''
 
         time_elapsed.append(time.time() - st)
         if len(time_elapsed) >= 100:
             tsum = sum(time_elapsed)
             print("Completed 100 batches in {:.3f}sec, avg {:.3f} it/sec".format(tsum, 100.0 / tsum), flush=True)
             time_elapsed = []
-print('saving')
+#print('saving')
 #save_checkpoint(state, path=config['device']['output_dir'], no_optimizer=True)
-test_info = val_epoch(state, prefix='test')
+test_info = val_epoch(state, prefix='test' if args.dataset == 'urfunny' else 'val')
 print(f"Test info: {pd.Series(test_info)}\n~\n", flush=True)
 test_info = {k + '_test': v for k, v in test_info.items()}
 wandb.log(test_info, commit=True)

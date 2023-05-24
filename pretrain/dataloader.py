@@ -962,6 +962,8 @@ if __name__ == '__main__':
     num_segments = config['num_segments']
 
     for x in dataset:
+        parsed = dataset_parser(x, config)
+        handled = handle_batch(parsed, num_devices=8, use_bfloat16=True)
         keys_to_features = {f'c{i:02d}/{k}': v for i in range(num_segments) for k, v in segment_k2f.items()}
         parsed_features = tf.io.parse_single_example(x, keys_to_features)
         features = {}

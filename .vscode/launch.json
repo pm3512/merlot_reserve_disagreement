@@ -22,7 +22,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "-ckpt", "/home/aobolens/ckpt/sim_0_lr/ckpt_760560"
+                "-ckpt", "/home/aobolens/ckpt/ckpt_zzzzzzzzzz"
             ]
         },
         {
@@ -34,7 +34,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "-fold", "92"
+                "-fold", "6"
             ]
         },
         {
@@ -46,20 +46,34 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "configs/pretrain_base.yaml", "--run_name", "pretrain_urfunny"
+                "configs/pretrain_base.yaml", "--run_name", "pretrain_urfunny,", "--reweight", "--dataset", "mustard",
+                "--sim_threshold_video", "2", "--sim_threshold_video", "100", "--sim_threshold_text", "100"
             ]
         },
         {
-            "name": "prep_data_urfunny.py",
+            "name": "prep_data_mustard.py",
             "type": "python",
             "request": "launch",
             "cwd": "${workspaceFolder}/finetune/tvqa",
-            "program": "prep_data_urfunny.py",
+            "program": "prep_data_mustard.py",
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "-fold", "0", "-num_folds", "8", "-split", "val"
+                "-fold", "0", "-num_folds", "8", "-split", "train"
             ]
-        }
+        },
+        {
+            "name": "view_sim.py",
+            "type": "python",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/pretrain",
+            "program": "view_sim.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "configs/pretrain_base.yaml", "--run_name", "view_sim", "--reweight", "--dataset", "social_iq",
+                "--sim_threshold_video", "2", "--sim_threshold_video", "100", "--sim_threshold_text", "100"
+            ]
+        },
     ]
 }

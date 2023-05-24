@@ -16,17 +16,18 @@ from pretrain.pretrain_model import *
 from flax import jax_utils
 from pretrain.optimization import construct_train_state
 from mreserve.checkpoint import save_checkpoint, load_checkpoint, bf16_to_f32
+#from mreserve.lowercase_encoder import get_encoder
 import argparse
 import numpy as np
 import functools
 import time
-import wandb
 from pretrain.pretrain_model import exclusions_list
 
 # DEBUG
 #jax.config.update('jax_disable_jit', True)
 
 
+#encoder = get_encoder()
 jax.config.update('jax_log_compiles', True)
 is_on_gpu = any([x.platform == 'gpu' for x in jax.local_devices()])
 if not is_on_gpu:
@@ -147,8 +148,6 @@ with open(args.config_file, 'r') as f:
 
 
 config['_path'] = args.config_file
-wandb.init(config=config, project=args.wandb_name, tags=['pretrain'], name=args.run_name)
-wandb.run.log_code('.')
 '''
 if (jax.process_index() == 0) and (not is_on_gpu) and (not args.disable_wandb):
     #import wandb
@@ -178,7 +177,7 @@ params = model.init_from_dummy_batch(dummy_batch)
 state = construct_train_state(opt_config=config['optimizer'], model=model, params=params)
 
 # load if we can
-state = load_checkpoint(state=state, path=os.path.join(config['device']['output_dir'], 'ckpt_zzzzzzzzzz'), step=None,
+state = load_checkpoint(state=state, path=os.path.join(config['device']['output_dir'], 'social_iq_t1'), step=None,
                         use_bfloat16_weights=config['optimizer'].get('use_bfloat16_weights', False))
 start_step = int(state.step)
 state = jax_utils.replicate(state)
@@ -188,66 +187,23 @@ p_train_step = jax.pmap(functools.partial(train_step, use_bfloat16_grads=config[
                                         reweight=config['model']['reweight'], thresholds={k: config['model'][k] for k in thresholds}),
                         axis_name='batch', donate_argnums=(0, 1,))
 
-'''
+similarities = []
 for batch in ds_train_iter:
-    pass
-'''
-train_metrics = []
-time_elapsed = []
-num_train_steps = config['optimizer'].get('num_train_steps_override', config['optimizer']['num_train_steps'])
-log_every = config['device'].get('commit_every_nsteps', 50)
-wandb_logs = {f'loss_{k}': [] for k in exclusions_list}
-if config['model']['reweight']:
-    wandb_logs['reweighted'] = []
-for n in range(num_train_steps):
-    st = time.time()
-    batch = next(ds_train_iter)
-    state, loss_info = p_train_step(state, batch)
-    if config['model']['reweight']:
-        (loss_info, total_loss, loss_reweighted) = loss_info
-    else:
-        (loss_info, total_loss) = loss_info
+    already_seen = False
+    _, loss_info = p_train_step(state, batch)
+    loss_info, _, _ = loss_info
     for i in range(config['device']['batch_size']):
-        for exclude in exclusions_list:
-            wandb_logs[f'loss_{exclude}'].append([total_loss[exclude][i].item()])
-        if config['model']['reweight']:
-            wandb_logs['reweighted'].append([loss_reweighted[i].item()])
-
-            log_data = {
-                f'loss_{exclude}': total_loss[exclude][i].item() for exclude in exclusions_list
-            }
-            if config['model']['reweight']:
-                log_data['reweighted'] = loss_reweighted[i]
-            wandb.log(log_data)
-
-    # Async transfer. Basically we queue the last thing, then log the thing from `log_every` iterations ago
-    if jax.process_index() == 0:
-        train_metrics.append(jax.tree_map(lambda x: x[0], loss_info))
-        jax.tree_map(lambda x: x.copy_to_host_async(), train_metrics[-1])
-
-        step_for_logging = n - log_every
-        if step_for_logging >= 0:
-            train_metrics[step_for_logging] = {k: float(v) for k, v in train_metrics[step_for_logging].items()}
-
-            wandb.log(train_metrics[step_for_logging], commit=(n + 1) % log_every == 0)
-
-    if (n + 1) % config['device']['iterations_per_loop'] == 0:
-        save_checkpoint(state, path=config['device']['output_subdir'])
-        print(f"Saving @iter {n:03d}.", flush=True)
-        temps = {}
-        for i, k in enumerate(['imgs_to_audio', 'text_to_audio', 'stuff_to_span']):
-            temps[k] = state.params._dict['contrastive_scales'][0, i].astype(jnp.float32)
-        temps = jax.device_get(temps)
-        for k, v in temps.items():
-            print("{} temperature: log={:.3f}  exp={:.3f}".format(k, v, np.exp(v)), flush=True)
-
-    time_elapsed.append(time.time() - st)
-    if len(time_elapsed) >= 100:
-        tsum = sum(time_elapsed)
-        print("Completed 100 batches in {:.3f}sec, avg {:.3f} it/sec".format(tsum, 100.0/tsum), flush=True)
-        time_elapsed = []
-
-for k, v in wandb_logs.items():
-    data = v
-    table = wandb.Table(data=data, columns=[k])
-    wandb.log({k: wandb.plot.histogram(table, k, title=None)})
+        for j in range(16):
+            similarity = 0
+            for k in loss_info:
+                if k.startswith('detailed_similarities_vision_text'):
+                    print(k, loss_info[k])
+                    print(loss_info[k][i])
+                    print(loss_info[k][i][j])
+                    similarity += loss_info[k][i][j]
+            print('spans', batch['text_spans'][i][0])
+            spans = jnp.concatenate([batch['text_spans'][i][0][3 * j + k] for k in range(3)])
+            #decoded =  encoder.decode(spans['text_spans'][i][0])
+            print('spans', spans)
+            print('decoded', spans)
+            similarities.append((similarities, spans))
